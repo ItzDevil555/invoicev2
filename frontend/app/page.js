@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = "https://invoicev2-f8bf.onrender.com";
 
 function cx(...classes) {
   return classes.filter(Boolean).join(" ");
