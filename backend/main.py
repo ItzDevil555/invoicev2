@@ -1,6 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pypdf import PdfReader, PdfWriter
+
 import os
 import uuid
 import pdfplumber
@@ -8,6 +10,14 @@ import pandas as pd
 import re
 import sqlite3
 from datetime import datetime
+import cv2
+import numpy as np
+from pdf2image import convert_from_path
+
+try:
+    from paddleocr import PPStructureV3
+except Exception:
+    PPStructureV3 = None
 
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -30,6 +40,25 @@ DB_PATH = os.path.join(BASE_DIR, "app.db")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# =========================
+# AI TABLE PARSER (OPTIONAL)
+# =========================
+AI_PARSER_AVAILABLE = False
+ai_parser = None
+
+if PPStructureV3 is not None:
+    try:
+        ai_parser = PPStructureV3(
+            lang="en",
+            device="cpu",
+            use_doc_orientation_classify=True,
+            use_doc_unwarping=True
+        )
+        AI_PARSER_AVAILABLE = True
+        print("AI parser loaded successfully.")
+    except Exception as e:
+        print("AI parser init failed:", str(e))
 
 
 def get_conn():
@@ -99,7 +128,10 @@ def startup():
 
 @app.get("/")
 def home():
-    return {"message": "UAE Customs Automation Backend Running"}
+    return {
+        "message": "UAE Customs Automation Backend Running",
+        "ai_parser_available": AI_PARSER_AVAILABLE
+    }
 
 
 def clean_cell(cell):
@@ -108,6 +140,129 @@ def clean_cell(cell):
     text = str(cell).replace("\n", " ").replace("\r", " ").strip()
     text = re.sub(r"\s+", " ", text)
     return text
+
+
+def group_words_into_rows(words, y_tolerance=6):
+    rows = []
+
+    for word in sorted(words, key=lambda w: (w["top"], w["x0"])):
+        placed = False
+
+        for row in rows:
+            if abs(row["top"] - word["top"]) <= y_tolerance:
+                row["words"].append(word)
+                row["tops"].append(word["top"])
+                row["top"] = sum(row["tops"]) / len(row["tops"])
+                placed = True
+                break
+
+        if not placed:
+            rows.append({
+                "top": word["top"],
+                "tops": [word["top"]],
+                "words": [word]
+            })
+
+    return rows
+
+
+def row_to_text_cells(row_words):
+    row_words = sorted(row_words, key=lambda w: w["x0"])
+    return [w["text"].strip() for w in row_words if w["text"].strip()]
+
+
+def detect_borderless_columns(words, min_repeats=3, bucket_size=25):
+    buckets = {}
+
+    for w in words:
+        x = int(w["x0"] // bucket_size) * bucket_size
+        buckets[x] = buckets.get(x, 0) + 1
+
+    candidate_x = [x for x, count in buckets.items() if count >= min_repeats]
+    candidate_x.sort()
+
+    if len(candidate_x) < 2:
+        return []
+
+    merged = [candidate_x[0]]
+    for x in candidate_x[1:]:
+        if abs(x - merged[-1]) > bucket_size:
+            merged.append(x)
+
+    return merged
+
+
+def assign_words_to_columns(row_words, column_starts):
+    row_words = sorted(row_words, key=lambda w: w["x0"])
+    cells = [""] * len(column_starts)
+
+    for w in row_words:
+        x = w["x0"]
+        col_idx = 0
+
+        for i, start in enumerate(column_starts):
+            if i == len(column_starts) - 1:
+                col_idx = i
+                break
+            if start <= x < column_starts[i + 1]:
+                col_idx = i
+                break
+
+        if cells[col_idx]:
+            cells[col_idx] += " " + w["text"].strip()
+        else:
+            cells[col_idx] = w["text"].strip()
+
+    return [c.strip() for c in cells]
+
+
+def looks_like_borderless_header(row):
+    text = " ".join(str(c).lower() for c in row if str(c).strip())
+    keywords = ["item", "description", "qty", "quantity", "rate", "price", "amount", "total"]
+    matches = sum(1 for k in keywords if k in text)
+    return matches >= 2
+
+
+def extract_borderless_tables_from_page(page):
+    words = page.extract_words(
+        x_tolerance=2,
+        y_tolerance=2,
+        keep_blank_chars=False,
+        use_text_flow=True
+    )
+
+    if not words:
+        return []
+
+    rows = group_words_into_rows(words, y_tolerance=5)
+    if not rows:
+        return []
+
+    column_starts = detect_borderless_columns(words, min_repeats=3, bucket_size=30)
+    if len(column_starts) < 2:
+        return []
+
+    rebuilt = []
+    for row in rows:
+        cells = assign_words_to_columns(row["words"], column_starts)
+
+        if any(str(c).strip() for c in cells):
+            rebuilt.append(cells)
+
+    cleaned = []
+    for row in rebuilt:
+        non_empty = sum(1 for c in row if str(c).strip())
+        if non_empty >= 2:
+            cleaned.append(row)
+
+    if len(cleaned) < 2:
+        return []
+
+    header_found = any(looks_like_borderless_header(r) for r in cleaned[:5])
+    if not header_found:
+        return []
+
+    return cleaned
 
 
 def normalize_spaces(text):
@@ -247,8 +402,10 @@ def merge_multiline_rows(rows):
             row = row + [""] * (max_len - len(row))
 
             for i in range(max_len):
-                if row[i].strip():
-                    if prev[i].strip():
+                row_val = str(row[i]).strip()
+                prev_val = str(prev[i]).strip()
+                if row_val:
+                    if prev_val:
                         prev[i] = f"{prev[i]} {row[i]}".strip()
                     else:
                         prev[i] = row[i]
@@ -281,6 +438,42 @@ def score_table(table):
     return (rows * 4) + (cols * 3) + filled + header_bonus + total_bonus
 
 
+def normalize_rotated_pdf(input_pdf_path, output_pdf_path):
+    reader = PdfReader(input_pdf_path)
+    writer = PdfWriter()
+
+    changed = False
+
+    for page in reader.pages:
+        rotation = page.get("/Rotate", 0)
+        rotation = int(rotation) if rotation is not None else 0
+        rotation = rotation % 360
+
+        if rotation != 0:
+            page.rotate(-rotation)
+            changed = True
+
+        writer.add_page(page)
+
+    with open(output_pdf_path, "wb") as f:
+        writer.write(f)
+
+    return changed
+
+
+def get_best_pdf_for_extraction(pdf_path):
+    normalized_pdf_path = pdf_path.replace(".pdf", "_upright.pdf")
+
+    try:
+        changed = normalize_rotated_pdf(pdf_path, normalized_pdf_path)
+        if changed and os.path.exists(normalized_pdf_path):
+            return normalized_pdf_path
+    except Exception:
+        pass
+
+    return pdf_path
+
+
 def extract_all_tables(pdf_path):
     candidate_tables = []
 
@@ -298,8 +491,155 @@ def extract_all_tables(pdf_path):
                         candidate_tables.append({
                             "page": page_num,
                             "table": cleaned,
-                            "score": score
+                            "score": score,
+                            "method": "lined"
                         })
+
+            borderless = extract_borderless_tables_from_page(page)
+            if borderless:
+                cleaned = normalize_rows(borderless)
+                if len(cleaned) >= 2:
+                    cleaned = merge_multiline_rows(cleaned)
+                    score = score_table(cleaned) + 10
+
+                    if score >= 20:
+                        candidate_tables.append({
+                            "page": page_num,
+                            "table": cleaned,
+                            "score": score,
+                            "method": "borderless"
+                        })
+
+    return candidate_tables
+
+
+# =========================
+# AI FALLBACK EXTRACTION
+# =========================
+def rotate_image_by_angle(img, angle):
+    if angle == 90:
+        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    if angle == 180:
+        return cv2.rotate(img, cv2.ROTATE_180)
+    if angle == 270:
+        return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return img
+
+
+def html_table_to_list(html):
+    try:
+        dfs = pd.read_html(html)
+        if not dfs:
+            return []
+        df = dfs[0].fillna("")
+        return df.values.tolist()
+    except Exception:
+        return []
+
+
+def normalize_ai_table(table):
+    if not table:
+        return []
+
+    cleaned = []
+    for row in table:
+        normalized_row = [clean_cell(cell) for cell in row]
+        if not is_empty_row(normalized_row):
+            cleaned.append(normalized_row)
+
+    if not cleaned:
+        return []
+
+    if len(cleaned) >= 2:
+        cleaned = merge_multiline_rows(cleaned)
+
+    return normalize_rows(cleaned)
+
+
+def extract_tables_with_ai(pdf_path):
+    if not AI_PARSER_AVAILABLE or ai_parser is None:
+        return []
+
+    candidate_tables = []
+
+    try:
+        pages = convert_from_path(pdf_path, dpi=300)
+    except Exception as e:
+        print("AI PDF image conversion failed:", str(e))
+        return []
+
+    for page_index, page in enumerate(pages, start=1):
+        img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
+        best_tables_for_page = []
+
+        for angle in [0, 90, 180, 270]:
+            rotated = rotate_image_by_angle(img, angle)
+
+            try:
+                result = ai_parser.predict(rotated)
+            except Exception:
+                try:
+                    result = ai_parser(rotated)
+                except Exception:
+                    continue
+
+            if not result:
+                continue
+
+            parsed_blocks = []
+            if isinstance(result, list):
+                parsed_blocks = result
+            else:
+                try:
+                    parsed_blocks = list(result)
+                except Exception:
+                    parsed_blocks = []
+
+            for block in parsed_blocks:
+                try:
+                    block_type = block.get("type", "")
+                    if block_type != "table":
+                        continue
+
+                    res_data = block.get("res", {})
+                    html = ""
+
+                    if isinstance(res_data, dict):
+                        html = res_data.get("html", "") or res_data.get("table_html", "")
+
+                    if not html:
+                        continue
+
+                    table = html_table_to_list(html)
+                    table = normalize_ai_table(table)
+
+                    if len(table) >= 2:
+                        score = score_table(table) + 30
+                        best_tables_for_page.append({
+                            "page": page_index,
+                            "table": table,
+                            "score": score,
+                            "method": f"ai_rot_{angle}"
+                        })
+                except Exception:
+                    continue
+
+        if best_tables_for_page:
+            best_tables_for_page = sorted(best_tables_for_page, key=lambda x: x["score"], reverse=True)
+
+            page_selected = []
+            seen_signatures = set()
+
+            for item in best_tables_for_page:
+                signature = str(item["table"][:3])
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                page_selected.append(item)
+                if len(page_selected) >= 2:
+                    break
+
+            candidate_tables.extend(page_selected)
 
     return candidate_tables
 
@@ -659,6 +999,96 @@ def add_source_column_if_missing(table):
     return new_table
 
 
+def is_summary_row(row):
+    text = " ".join(str(cell).strip().lower() for cell in row if str(cell).strip())
+
+    summary_keywords = [
+        "subtotal",
+        "sub total",
+        "invoice total",
+        "grand total",
+        "total amount",
+        "net total",
+        "final invoice value",
+        "discount",
+        "less:",
+        "total:"
+    ]
+
+    return any(keyword in text for keyword in summary_keywords)
+
+
+def filter_items_only(table):
+    if not table:
+        return table
+
+    filtered = []
+
+    for i, row in enumerate(table):
+        if i == 0:
+            filtered.append(row)
+            continue
+
+        if is_summary_row(row):
+            continue
+
+        filtered.append(row)
+
+    return filtered
+
+
+def convert_cell_to_number(cell):
+    if cell is None:
+        return ""
+
+    value = str(cell).strip()
+    if value == "":
+        return ""
+
+    if re.fullmatch(r"0\d+", value):
+        return value
+
+    cleaned = value.replace(",", "")
+    cleaned = cleaned.replace("$", "")
+    cleaned = cleaned.replace("AED", "")
+    cleaned = cleaned.replace("USD", "")
+    cleaned = cleaned.replace("SAR", "")
+    cleaned = cleaned.strip()
+
+    if re.fullmatch(r"\(\d+(\.\d+)?\)", cleaned):
+        cleaned = "-" + cleaned[1:-1]
+
+    if re.fullmatch(r"-?\d+", cleaned):
+        try:
+            return int(cleaned)
+        except Exception:
+            return value
+
+    if re.fullmatch(r"-?\d+\.\d+", cleaned):
+        try:
+            return float(cleaned)
+        except Exception:
+            return value
+
+    return value
+
+
+def convert_table_numeric_values(table):
+    if not table:
+        return table
+
+    converted = []
+
+    for row_index, row in enumerate(table):
+        if row_index == 0:
+            converted.append(row)
+            continue
+
+        converted.append([convert_cell_to_number(cell) for cell in row])
+
+    return converted
+
+
 def build_preview_rows(table, limit=10):
     if not table:
         return []
@@ -815,10 +1245,17 @@ async def upload_pdf(file: UploadFile = File(...)):
     with open(pdf_path, "wb") as f:
         f.write(await file.read())
 
+    working_pdf_path = get_best_pdf_for_extraction(pdf_path)
+
     try:
-        candidate_tables = extract_all_tables(pdf_path)
+        candidate_tables = extract_all_tables(working_pdf_path)
+
         if not candidate_tables:
-            raise HTTPException(status_code=400, detail="No clean usable tables found in the PDF.")
+            print("No tables found with standard extraction. Trying AI parser...")
+            candidate_tables = extract_tables_with_ai(working_pdf_path)
+
+        if not candidate_tables:
+            raise HTTPException(status_code=400, detail="No usable tables found in the PDF.")
 
         combined_table = combine_all_tables(candidate_tables)
         if not combined_table:
@@ -826,8 +1263,11 @@ async def upload_pdf(file: UploadFile = File(...)):
 
         combined_table = add_source_column_if_missing(combined_table)
 
-        company_info = extract_company_info(pdf_path)
+        company_info = extract_company_info(working_pdf_path)
         summary = build_summary(combined_table)
+
+        combined_table = filter_items_only(combined_table)
+        combined_table = convert_table_numeric_values(combined_table)
 
         items_df = pd.DataFrame(combined_table)
         company_df = pd.DataFrame(list(company_info.items()), columns=["Field", "Value"])
@@ -877,7 +1317,8 @@ async def upload_pdf(file: UploadFile = File(...)):
             "weight_matched": summary.get("Weight Matched Count", 0),
             "data_sources": summary.get("Data Sources Count", 1),
             "line_items": summary.get("Total Line Items", 0),
-            "merged_line_items": merged_preview
+            "merged_line_items": merged_preview,
+            "ai_parser_available": AI_PARSER_AVAILABLE
         }
 
         save_job(file_id, file.filename, safe_original_name, response_payload, merged_preview)
@@ -922,7 +1363,8 @@ def dashboard_summary():
         "pending_jobs": pending,
         "excel_exports": total_files,
         "total_items": total_items,
-        "recent_uploads": rows
+        "recent_uploads": rows,
+        "ai_parser_available": AI_PARSER_AVAILABLE
     }
 
 
@@ -962,6 +1404,7 @@ def get_job(job_id: str):
     result = dict(job)
     result["merged_line_items"] = merged_items
     result["excel_file"] = f"/download-excel/{job_id}?original_name={result['safe_file_name']}"
+    result["ai_parser_available"] = AI_PARSER_AVAILABLE
     return result
 
 
