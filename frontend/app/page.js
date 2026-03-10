@@ -44,6 +44,7 @@ function SectionCard({ title, subtitle, children, rightSlot }) {
   );
 }
 
+<<<<<<< HEAD
 function Badge({ children, tone = "default" }) {
   const tones = {
     default: "border-slate-700 bg-slate-800 text-slate-200",
@@ -54,6 +55,92 @@ function Badge({ children, tone = "default" }) {
     purple: "border-violet-800 bg-violet-950/60 text-violet-300",
   };
 
+=======
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [dashboard, setDashboard] = useState({
+    processed_today: 0,
+    successful_extractions: 0,
+    pending_jobs: 0,
+    excel_exports: 0,
+    recent_uploads: [],
+  });
+
+  const loadDashboard = async () => {
+    try {
+      const res = await fetch("https://invoicev2-f8bf.onrender.com/dashboard-summary");
+      const data = await res.json();
+      setDashboard(data);
+    } catch {
+      console.log("Dashboard load failed");
+    }
+  };
+
+  useEffect(() => {
+    loadDashboard();
+  }, []);
+
+  const handleUpload = async () => {
+    if (!file) {
+      setMessage("Please choose a PDF file first.");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      setLoading(true);
+      setMessage("Processing PDF and building merged line items...");
+
+      const response = await fetch("https://invoicev2-f8bf.onrender.com/upload-pdf/", {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        setMessage(data.detail || "Something went wrong.");
+        return;
+      }
+
+      setMessage("Upload completed successfully.");
+      await loadDashboard();
+
+      router.push(`/results/${data.id}`);
+    } catch {
+      setMessage("Error connecting to backend.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const stats = [
+    {
+      title: "Processed Files",
+      value: dashboard.processed_today,
+      hint: "All uploaded PDF files",
+    },
+    {
+      title: "Successful Extractions",
+      value: dashboard.successful_extractions,
+      hint: "Tables exported correctly",
+    },
+    {
+      title: "Pending Jobs",
+      value: dashboard.pending_jobs,
+      hint: "Currently processing",
+    },
+    {
+      title: "Excel Exports",
+      value: dashboard.excel_exports,
+      hint: "Generated files",
+    },
+  ];
+
+>>>>>>> 9a1c74a37dcc40296b5b36e87606fc2ff35d64d8
   return (
     <span
       className={cx(
