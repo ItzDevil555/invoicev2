@@ -46,7 +46,7 @@ export default function ResultPage() {
 
     const load = async () => {
       try {
-        const res = await fetch(`http://127.0.0.1:8000/jobs/${id}`);
+        const res = await fetch(`https://invoicev2-f8bf.onrender.com/jobs/${id}`);
         const json = await res.json();
         setData(json);
       } catch (error) {
@@ -114,7 +114,7 @@ export default function ResultPage() {
                 ✓ {data.status}
               </span>
               <a
-                href={`http://127.0.0.1:8000${data.excel_file}`}
+                href={`https://invoicev2-f8bf.onrender.com${data.excel_file}`}
                 className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
               >
                 Export Excel
