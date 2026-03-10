@@ -29,7 +29,7 @@ export default function Home() {
 
   const loadDashboard = async () => {
     try {
-      const res = await fetch("http://127.0.0.1:8000/dashboard-summary");
+      const res = await fetch("https://invoicev2-f8bf.onrender.com/dashboard-summary");
       const data = await res.json();
       setDashboard(data);
     } catch {
@@ -54,7 +54,7 @@ export default function Home() {
       setLoading(true);
       setMessage("Processing PDF and building merged line items...");
 
-      const response = await fetch("http://127.0.0.1:8000/upload-pdf/", {
+      const response = await fetch("https://invoicev2-f8bf.onrender.com/upload-pdf/", {
         method: "POST",
         body: formData,
       });
