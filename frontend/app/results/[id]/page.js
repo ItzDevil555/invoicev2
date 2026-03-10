@@ -156,7 +156,6 @@ export default function ResultDetailsPage() {
 
     const fetchResult = async () => {
       try {
-<<<<<<< HEAD
         setLoading(true);
         setError("");
 
@@ -168,9 +167,6 @@ export default function ResultDetailsPage() {
           throw new Error("Failed to fetch result details");
         }
 
-=======
-        const res = await fetch(`https://invoicev2-f8bf.onrender.com/jobs/${id}`);
->>>>>>> 9a1c74a37dcc40296b5b36e87606fc2ff35d64d8
         const json = await res.json();
         setData(json);
 
@@ -315,24 +311,8 @@ export default function ResultDetailsPage() {
                 onClick={() => setExportOpen((v) => !v)}
                 className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
               >
-<<<<<<< HEAD
                 Export Options
               </button>
-=======
-                Back to Dashboard
-              </Link>
-              <span className="rounded-full border border-emerald-400/20 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-300">
-                ✓ {data.status}
-              </span>
-              <a
-                href={`https://invoicev2-f8bf.onrender.com${data.excel_file}`}
-                className="rounded-xl bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
-              >
-                Export Excel
-              </a>
-            </div>
-          </div>
->>>>>>> 9a1c74a37dcc40296b5b36e87606fc2ff35d64d8
 
               {exportOpen && (
                 <div className="absolute right-0 z-30 mt-2 w-52 rounded-2xl border border-slate-800 bg-slate-950 p-2 shadow-2xl">

@@ -1,146 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import Link from "next/link";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
 
 function cx(...classes) {
   return classes.filter(Boolean).join(" ");
 }
 
-function StatCard({ title, value, subtext, tone = "default" }) {
-  const tones = {
-    default: "border-slate-800 bg-slate-900",
-    blue: "border-blue-900/60 bg-blue-950/30",
-    green: "border-emerald-900/60 bg-emerald-950/30",
-    amber: "border-amber-900/60 bg-amber-950/30",
-    purple: "border-violet-900/60 bg-violet-950/30",
-  };
-
-  return (
-    <div className={cx("rounded-2xl border p-5 shadow-sm", tones[tone])}>
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-        {title}
-      </p>
-      <h3 className="mt-2 text-3xl font-bold text-white">{value ?? "-"}</h3>
-      {subtext ? <p className="mt-1 text-sm text-slate-500">{subtext}</p> : null}
-    </div>
-  );
-}
-
-function SectionCard({ title, subtitle, children, rightSlot }) {
-  return (
-    <div className="rounded-3xl border border-slate-800 bg-slate-900/80 shadow-[0_0_0_1px_rgba(255,255,255,0.01)] backdrop-blur">
-      <div className="flex flex-col gap-3 border-b border-slate-800 px-6 py-5 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <h2 className="text-lg font-bold text-white">{title}</h2>
-          {subtitle ? <p className="mt-1 text-sm text-slate-400">{subtitle}</p> : null}
-        </div>
-        {rightSlot}
-      </div>
-      <div className="px-6 py-5">{children}</div>
-    </div>
-  );
-}
-
-<<<<<<< HEAD
 function Badge({ children, tone = "default" }) {
   const tones = {
     default: "border-slate-700 bg-slate-800 text-slate-200",
     green: "border-emerald-800 bg-emerald-950/60 text-emerald-300",
     blue: "border-blue-800 bg-blue-950/60 text-blue-300",
     amber: "border-amber-800 bg-amber-950/60 text-amber-300",
-    red: "border-red-800 bg-red-950/60 text-red-300",
     purple: "border-violet-800 bg-violet-950/60 text-violet-300",
   };
 
-=======
-  const [file, setFile] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("");
-  const [dashboard, setDashboard] = useState({
-    processed_today: 0,
-    successful_extractions: 0,
-    pending_jobs: 0,
-    excel_exports: 0,
-    recent_uploads: [],
-  });
-
-  const loadDashboard = async () => {
-    try {
-      const res = await fetch("https://invoicev2-f8bf.onrender.com/dashboard-summary");
-      const data = await res.json();
-      setDashboard(data);
-    } catch {
-      console.log("Dashboard load failed");
-    }
-  };
-
-  useEffect(() => {
-    loadDashboard();
-  }, []);
-
-  const handleUpload = async () => {
-    if (!file) {
-      setMessage("Please choose a PDF file first.");
-      return;
-    }
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      setLoading(true);
-      setMessage("Processing PDF and building merged line items...");
-
-      const response = await fetch("https://invoicev2-f8bf.onrender.com/upload-pdf/", {
-        method: "POST",
-        body: formData,
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setMessage(data.detail || "Something went wrong.");
-        return;
-      }
-
-      setMessage("Upload completed successfully.");
-      await loadDashboard();
-
-      router.push(`/results/${data.id}`);
-    } catch {
-      setMessage("Error connecting to backend.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const stats = [
-    {
-      title: "Processed Files",
-      value: dashboard.processed_today,
-      hint: "All uploaded PDF files",
-    },
-    {
-      title: "Successful Extractions",
-      value: dashboard.successful_extractions,
-      hint: "Tables exported correctly",
-    },
-    {
-      title: "Pending Jobs",
-      value: dashboard.pending_jobs,
-      hint: "Currently processing",
-    },
-    {
-      title: "Excel Exports",
-      value: dashboard.excel_exports,
-      hint: "Generated files",
-    },
-  ];
-
->>>>>>> 9a1c74a37dcc40296b5b36e87606fc2ff35d64d8
   return (
     <span
       className={cx(
@@ -153,144 +30,81 @@ function Badge({ children, tone = "default" }) {
   );
 }
 
-function MiniBar({ label, value, total, tone = "blue" }) {
-  const width = total > 0 ? Math.max(6, Math.round((value / total) * 100)) : 0;
-
-  const toneMap = {
-    blue: "from-blue-400 to-blue-600",
-    green: "from-emerald-400 to-emerald-600",
-    amber: "from-amber-400 to-amber-600",
-    red: "from-red-400 to-red-600",
-    purple: "from-violet-400 to-violet-600",
-  };
-
+function SectionCard({ title, subtitle, children }) {
   return (
-    <div>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm text-slate-300">{label}</span>
-        <span className="text-sm font-semibold text-white">{value}</span>
+    <div className="rounded-3xl border border-slate-800 bg-slate-900/80 shadow-[0_0_0_1px_rgba(255,255,255,0.01)] backdrop-blur">
+      <div className="border-b border-slate-800 px-6 py-5">
+        <h2 className="text-lg font-bold text-white">{title}</h2>
+        {subtitle ? <p className="mt-1 text-sm text-slate-400">{subtitle}</p> : null}
       </div>
-      <div className="h-2 w-full overflow-hidden rounded-full bg-slate-800">
-        <div
-          className={cx("h-full rounded-full bg-gradient-to-r", toneMap[tone])}
-          style={{ width: `${width}%` }}
-        />
-      </div>
+      <div className="px-6 py-5">{children}</div>
     </div>
   );
 }
 
-function formatMoney(value) {
-  if (value === null || value === undefined || value === "") return "-";
-  const num = Number(String(value).replace(/,/g, ""));
-  if (Number.isNaN(num)) return String(value);
-  return new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 2,
-  }).format(num);
+function StatCard({ title, value, subtext }) {
+  return (
+    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+        {title}
+      </p>
+      <h3 className="mt-2 text-3xl font-bold text-white">{value}</h3>
+      <p className="mt-1 text-sm text-slate-500">{subtext}</p>
+    </div>
+  );
 }
 
-export default function DashboardPage() {
-  const [summary, setSummary] = useState(null);
-  const [jobs, setJobs] = useState([]);
-  const [loading, setLoading] = useState(true);
+export default function HomePage() {
+  const router = useRouter();
+
+  const [file, setFile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [search, setSearch] = useState("");
 
-  useEffect(() => {
-    const fetchDashboard = async () => {
-      try {
-        setLoading(true);
-        setError("");
+  const handleUpload = async (e) => {
+    e.preventDefault();
 
-        const [summaryRes, jobsRes] = await Promise.all([
-          fetch(`${API_BASE}/dashboard-summary`, { cache: "no-store" }),
-          fetch(`${API_BASE}/jobs`, { cache: "no-store" }),
-        ]);
+    if (!file) {
+      setError("Please choose a PDF file first.");
+      return;
+    }
 
-        if (!summaryRes.ok) throw new Error("Failed to load dashboard summary");
-        if (!jobsRes.ok) throw new Error("Failed to load jobs");
+    if (!file.name.toLowerCase().endsWith(".pdf")) {
+      setError("Only PDF files are allowed.");
+      return;
+    }
 
-        const summaryJson = await summaryRes.json();
-        const jobsJson = await jobsRes.json();
+    try {
+      setLoading(true);
+      setError("");
+      setMessage("");
 
-        setSummary(summaryJson);
-        setJobs(Array.isArray(jobsJson) ? jobsJson : []);
-      } catch (err) {
-        setError(err.message || "Something went wrong");
-      } finally {
-        setLoading(false);
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch(`${API_BASE}/upload-pdf/`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data?.detail || "Upload failed.");
       }
-    };
 
-    fetchDashboard();
-  }, []);
+      setMessage("PDF processed successfully.");
 
-  const filteredJobs = useMemo(() => {
-    if (!search.trim()) return jobs;
-    const q = search.toLowerCase();
-
-    return jobs.filter((job) => {
-      return (
-        String(job.id || "").toLowerCase().includes(q) ||
-        String(job.original_file_name || "").toLowerCase().includes(q) ||
-        String(job.status || "").toLowerCase().includes(q) ||
-        String(job.total_value || "").toLowerCase().includes(q)
-      );
-    });
-  }, [jobs, search]);
-
-  const processedCount = summary?.processed_today || 0;
-  const successCount = summary?.successful_extractions || 0;
-  const pendingCount = summary?.pending_jobs || 0;
-  const totalItems = summary?.total_items || 0;
-
-  const failedOrPending = Math.max(processedCount - successCount, pendingCount);
-
-  const successRate = processedCount > 0
-    ? Math.round((successCount / processedCount) * 100)
-    : 0;
-
-  const totalValue = useMemo(() => {
-    return jobs.reduce((sum, job) => {
-      const val = Number(String(job.total_value || "").replace(/,/g, ""));
-      return sum + (Number.isNaN(val) ? 0 : val);
-    }, 0);
-  }, [jobs]);
-
-  const avgItemsPerDoc = processedCount > 0
-    ? (totalItems / processedCount).toFixed(1)
-    : "0";
-
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-[radial-gradient(circle_at_top,#0f172a_0%,#020617_55%)] px-4 py-8 text-white sm:px-6 lg:px-8">
-        <div className="mx-auto max-w-7xl animate-pulse space-y-6">
-          <div className="h-12 w-72 rounded-xl bg-slate-800" />
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {[...Array(4)].map((_, i) => (
-              <div key={i} className="h-28 rounded-2xl bg-slate-800" />
-            ))}
-          </div>
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_320px]">
-            <div className="h-[420px] rounded-3xl bg-slate-800" />
-            <div className="h-[420px] rounded-3xl bg-slate-800" />
-          </div>
-          <div className="h-[420px] rounded-3xl bg-slate-800" />
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="min-h-screen bg-[radial-gradient(circle_at_top,#0f172a_0%,#020617_55%)] px-4 py-10 text-white sm:px-6 lg:px-8">
-        <div className="mx-auto max-w-3xl rounded-3xl border border-red-900 bg-slate-900 p-8 text-center">
-          <h1 className="text-2xl font-bold">Dashboard unavailable</h1>
-          <p className="mt-2 text-slate-400">{error}</p>
-        </div>
-      </div>
-    );
-  }
+      if (data?.id) {
+        router.push(`/results/${data.id}`);
+      }
+    } catch (err) {
+      setError(err.message || "Something went wrong while uploading.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,#0f172a_0%,#020617_55%)] text-white">
@@ -298,295 +112,156 @@ export default function DashboardPage() {
         <div className="mb-8 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div className="mb-3 flex flex-wrap gap-2">
-              <Badge tone="blue">Invoice Parser Dashboard</Badge>
-              <Badge tone={successRate >= 80 ? "green" : successRate >= 50 ? "amber" : "red"}>
-                Success Rate {successRate}%
-              </Badge>
-              {summary?.ai_parser_available ? (
-                <Badge tone="purple">AI Parser Enabled</Badge>
-              ) : (
-                <Badge tone="amber">Standard Parser Mode</Badge>
-              )}
+              <Badge tone="blue">Invoice Parser</Badge>
+              <Badge tone="purple">UAE Customs Workflow</Badge>
+              <Badge tone="green">Excel Export Ready</Badge>
             </div>
 
-            <h1 className="text-3xl font-bold tracking-tight sm:text-4xl">
-              Operations Dashboard
+            <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">
+              Smart Invoice Extraction
             </h1>
-            <p className="mt-2 text-sm text-slate-400">
-              Monitor document processing, extraction quality, and recent activity.
+            <p className="mt-3 max-w-2xl text-sm text-slate-400 sm:text-base">
+              Upload commercial invoice PDFs, extract line items, company info, totals,
+              and export the results directly to Excel.
             </p>
-          </div>
-
-          <div className="flex flex-col gap-3 sm:flex-row">
-            <Link
-              href="/upload"
-              className="inline-flex items-center justify-center rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-200"
-            >
-              Upload New PDF
-            </Link>
-            <Link
-              href="/results"
-              className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
-            >
-              View Results
-            </Link>
           </div>
         </div>
 
         <div className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
           <StatCard
-            title="Processed Documents"
-            value={processedCount}
-            subtext="Total files handled by the system"
-            tone="blue"
+            title="Input Format"
+            value="PDF"
+            subtext="Commercial invoice documents"
           />
           <StatCard
-            title="Successful Extractions"
-            value={successCount}
-            subtext="Documents parsed successfully"
-            tone="green"
+            title="Output Format"
+            value="Excel"
+            subtext="Structured export for review"
           />
           <StatCard
-            title="Total Line Items"
-            value={totalItems}
-            subtext="Extracted rows across all jobs"
-            tone="purple"
+            title="Table Support"
+            value="Borderless"
+            subtext="Handles difficult invoice layouts"
           />
           <StatCard
-            title="Total Invoice Value"
-            value={formatMoney(totalValue)}
-            subtext="Combined value from parsed jobs"
-            tone="amber"
+            title="Workflow"
+            value="FastAPI"
+            subtext="Connected to your backend parser"
           />
         </div>
 
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_320px]">
-          <div className="space-y-6">
-            <SectionCard
-              title="Processing Overview"
-              subtitle="Core health signals for your parser workflow"
-            >
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-                  <h3 className="text-base font-semibold text-white">Status Distribution</h3>
-                  <MiniBar
-                    label="Processed"
-                    value={processedCount}
-                    total={Math.max(processedCount, 1)}
-                    tone="blue"
-                  />
-                  <MiniBar
-                    label="Successful"
-                    value={successCount}
-                    total={Math.max(processedCount, 1)}
-                    tone="green"
-                  />
-                  <MiniBar
-                    label="Pending / Failed"
-                    value={failedOrPending}
-                    total={Math.max(processedCount, 1)}
-                    tone="amber"
-                  />
-                </div>
+          <div className="mt-6 rounded-3xl border border-indigo-800 bg-gradient-to-r from-indigo-950/60 to-violet-950/60 p-6 shadow-sm">
+  
+  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
 
-                <div className="space-y-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-5">
-                  <h3 className="text-base font-semibold text-white">Useful Metrics</h3>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
-                      <p className="text-xs uppercase tracking-wide text-slate-500">
-                        Success Rate
-                      </p>
-                      <p className="mt-2 text-2xl font-bold text-white">{successRate}%</p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
-                      <p className="text-xs uppercase tracking-wide text-slate-500">
-                        Avg Items / Doc
-                      </p>
-                      <p className="mt-2 text-2xl font-bold text-white">{avgItemsPerDoc}</p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
-                      <p className="text-xs uppercase tracking-wide text-slate-500">
-                        Excel Exports
-                      </p>
-                      <p className="mt-2 text-2xl font-bold text-white">
-                        {summary?.excel_exports || 0}
-                      </p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
-                      <p className="text-xs uppercase tracking-wide text-slate-500">
-                        Active Queue
-                      </p>
-                      <p className="mt-2 text-2xl font-bold text-white">{pendingCount}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </SectionCard>
+    <div>
+      <h3 className="text-lg font-bold text-white">
+        AI Document Intelligence (Coming Soon)
+      </h3>
 
-            <SectionCard
-              title="Recent Documents"
-              subtitle="Latest processed and uploaded files"
-              rightSlot={
+      <p className="mt-2 max-w-2xl text-sm text-slate-300">
+        We are currently integrating advanced AI document parsing to improve
+        accuracy for complex invoices, rotated PDFs, scanned documents,
+        and borderless tables.
+      </p>
+
+      <p className="mt-2 text-sm text-slate-400">
+        Upcoming features will include smarter table detection, automatic
+        column mapping, and improved data validation.
+      </p>
+    </div>
+
+    <div className="flex items-center gap-2">
+      <span className="rounded-full border border-indigo-700 bg-indigo-950 px-3 py-1 text-xs font-semibold text-indigo-300">
+        AI Upgrade
+      </span>
+
+      <span className="rounded-full border border-violet-700 bg-violet-950 px-3 py-1 text-xs font-semibold text-violet-300">
+        Soon
+      </span>
+    </div>
+
+  </div>
+
+</div>
+          <SectionCard
+            title="Upload Invoice PDF"
+            subtitle="Choose a PDF and send it to your extraction backend"
+          >
+            <form onSubmit={handleUpload} className="space-y-5">
+              <div className="rounded-2xl border border-dashed border-slate-700 bg-slate-950/40 p-6">
+                <label className="mb-3 block text-sm font-semibold text-slate-300">
+                  Select PDF file
+                </label>
+
                 <input
-                  type="text"
-                  placeholder="Search files, status, value..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="w-full rounded-2xl border border-slate-700 bg-slate-950 px-4 py-2.5 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-slate-500 lg:w-72"
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  onChange={(e) => {
+                    const selected = e.target.files?.[0] || null;
+                    setFile(selected);
+                    setError("");
+                    setMessage("");
+                  }}
+                  className="block w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-slate-200 file:mr-4 file:rounded-lg file:border-0 file:bg-white file:px-4 file:py-2 file:text-sm file:font-semibold file:text-slate-900 hover:file:bg-slate-200"
                 />
-              }
-            >
-              <div className="overflow-x-auto rounded-2xl border border-slate-800">
-                <table className="min-w-full border-collapse text-sm">
-                  <thead className="bg-slate-950">
-                    <tr>
-                      <th className="border-b border-slate-800 px-4 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-400">
-                        File
-                      </th>
-                      <th className="border-b border-slate-800 px-4 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-400">
-                        Uploaded
-                      </th>
-                      <th className="border-b border-slate-800 px-4 py-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-400">
-                        Status
-                      </th>
-                      <th className="border-b border-slate-800 px-4 py-4 text-right text-xs font-semibold uppercase tracking-wide text-slate-400">
-                        Items
-                      </th>
-                      <th className="border-b border-slate-800 px-4 py-4 text-right text-xs font-semibold uppercase tracking-wide text-slate-400">
-                        Value
-                      </th>
-                      <th className="border-b border-slate-800 px-4 py-4 text-right text-xs font-semibold uppercase tracking-wide text-slate-400">
-                        Action
-                      </th>
-                    </tr>
-                  </thead>
 
-                  <tbody className="bg-slate-900">
-                    {filteredJobs.length ? (
-                      filteredJobs.slice(0, 20).map((job) => {
-                        const statusText = String(job.status || "Unknown");
-                        const statusTone =
-                          statusText.toLowerCase() === "processed"
-                            ? "green"
-                            : statusText.toLowerCase().includes("pending")
-                            ? "amber"
-                            : "red";
-
-                        return (
-                          <tr
-                            key={job.id}
-                            className="border-b border-slate-800 transition hover:bg-slate-800/60"
-                          >
-                            <td className="px-4 py-4 text-slate-200">
-                              <div className="max-w-[320px] truncate font-medium">
-                                {job.original_file_name || "-"}
-                              </div>
-                              <div className="mt-1 text-xs text-slate-500">
-                                ID: {job.id}
-                              </div>
-                            </td>
-                            <td className="px-4 py-4 text-slate-400">
-                              {job.uploaded_at || "-"}
-                            </td>
-                            <td className="px-4 py-4">
-                              <Badge tone={statusTone}>{statusText}</Badge>
-                            </td>
-                            <td className="px-4 py-4 text-right text-slate-300">
-                              {job.total_line_items ?? 0}
-                            </td>
-                            <td className="px-4 py-4 text-right text-slate-300">
-                              {formatMoney(job.total_value)}
-                            </td>
-                            <td className="px-4 py-4 text-right">
-                              <Link
-                                href={`/results/${job.id}`}
-                                className="inline-flex items-center rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-800"
-                              >
-                                Open
-                              </Link>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    ) : (
-                      <tr>
-                        <td
-                          colSpan={6}
-                          className="px-4 py-12 text-center text-slate-500"
-                        >
-                          No documents found.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
+                {file ? (
+                  <div className="mt-4 rounded-xl border border-slate-800 bg-slate-900 px-4 py-3 text-sm text-slate-300">
+                    Selected file: <span className="font-semibold text-white">{file.name}</span>
+                  </div>
+                ) : null}
               </div>
-            </SectionCard>
-          </div>
 
-          <div className="space-y-6 xl:sticky xl:top-6 xl:self-start">
-            <SectionCard title="Quick Actions" subtitle="Most useful shortcuts">
-              <div className="grid grid-cols-1 gap-3">
-                <Link
-                  href="/upload"
-                  className="inline-flex items-center justify-center rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-200"
+              {message ? (
+                <div className="rounded-2xl border border-emerald-800 bg-emerald-950/50 px-4 py-3 text-sm text-emerald-300">
+                  {message}
+                </div>
+              ) : null}
+
+              {error ? (
+                <div className="rounded-2xl border border-red-800 bg-red-950/50 px-4 py-3 text-sm text-red-300">
+                  {error}
+                </div>
+              ) : null}
+
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="inline-flex items-center justify-center rounded-2xl bg-white px-5 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  Upload New Invoice
-                </Link>
+                  {loading ? "Processing..." : "Upload and Extract"}
+                </button>
 
-                <Link
-                  href="/results"
-                  className="rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-center text-sm font-semibold text-slate-200 hover:bg-slate-800"
+                <button
+                  type="button"
+                  onClick={() => router.push("/dashboard")}
+                  className="inline-flex items-center justify-center rounded-2xl border border-slate-700 bg-slate-900 px-5 py-3 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
                 >
-                  Browse All Results
-                </Link>
+                  Open Dashboard
+                </button>
               </div>
-            </SectionCard>
+            </form>
+          </SectionCard>
 
-            <SectionCard title="System Snapshot" subtitle="Useful summary only">
-              <div className="space-y-3 text-sm">
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>Processed Today</span>
-                  <span className="font-semibold text-slate-200">
-                    {summary?.processed_today || 0}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>Successful</span>
-                  <span className="font-semibold text-slate-200">
-                    {summary?.successful_extractions || 0}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>Pending</span>
-                  <span className="font-semibold text-slate-200">
-                    {summary?.pending_jobs || 0}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>Total Items</span>
-                  <span className="font-semibold text-slate-200">
-                    {summary?.total_items || 0}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-slate-400">
-                  <span>AI Parser</span>
-                  <span className="font-semibold text-slate-200">
-                    {summary?.ai_parser_available ? "Enabled" : "Disabled"}
-                  </span>
-                </div>
+          <SectionCard
+            title="Quick Notes"
+            subtitle="Useful reminders before upload"
+          >
+            <div className="space-y-4 text-sm text-slate-400">
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                Upload only invoice PDFs for the best extraction result.
               </div>
-            </SectionCard>
-
-            <SectionCard title="What was removed" subtitle="Cleaner dashboard choices">
-              <ul className="space-y-2 text-sm text-slate-400">
-                <li>• Repeated cards showing the same metric</li>
-                <li>• Useless decorative charts</li>
-                <li>• Empty widgets with no real meaning</li>
-                <li>• Duplicate status counts</li>
-              </ul>
-            </SectionCard>
-          </div>
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                After processing, you will be redirected to the result page automatically.
+              </div>
+              <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                Make sure your FastAPI backend is running on the correct API base URL.
+              </div>
+            </div>
+          </SectionCard>
         </div>
       </div>
     </div>
