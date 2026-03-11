@@ -10,7 +10,6 @@ import pandas as pd
 import re
 import sqlite3
 import json
-import fitz  # PyMuPDF
 from datetime import datetime
 from typing import List, Dict, Tuple
 
@@ -170,13 +169,16 @@ def convert_cell_to_number(cell):
     if value == "":
         return ""
 
+    # Keep long numeric strings as text to avoid Excel scientific notation
     digits_only = re.sub(r"[^\d]", "", value)
     if digits_only and len(digits_only) >= 10:
         return value
 
+    # Keep codes with hyphens/slashes as text
     if re.search(r"[-/]", value):
         return value
 
+    # Keep values starting with 0 as text
     if re.fullmatch(r"0\d+", value):
         return value
 
@@ -231,16 +233,123 @@ def build_preview_rows(table, limit=10):
 
 
 # =========================================================
-# TABLE LOGIC
+# TABLE EXTRACTION HELPERS
 # =========================================================
+def group_words_into_rows(words, y_tolerance=6):
+    rows = []
+
+    for word in sorted(words, key=lambda w: (w["top"], w["x0"])):
+        placed = False
+
+        for row in rows:
+            if abs(row["top"] - word["top"]) <= y_tolerance:
+                row["words"].append(word)
+                row["tops"].append(word["top"])
+                row["top"] = sum(row["tops"]) / len(row["tops"])
+                placed = True
+                break
+
+        if not placed:
+            rows.append({
+                "top": word["top"],
+                "tops": [word["top"]],
+                "words": [word]
+            })
+
+    return rows
+
+
+def detect_borderless_columns(words, min_repeats=3, bucket_size=25):
+    buckets = {}
+
+    for w in words:
+        x = int(w["x0"] // bucket_size) * bucket_size
+        buckets[x] = buckets.get(x, 0) + 1
+
+    candidate_x = [x for x, count in buckets.items() if count >= min_repeats]
+    candidate_x.sort()
+
+    if len(candidate_x) < 2:
+        return []
+
+    merged = [candidate_x[0]]
+    for x in candidate_x[1:]:
+        if abs(x - merged[-1]) > bucket_size:
+            merged.append(x)
+
+    return merged
+
+
+def assign_words_to_columns(row_words, column_starts):
+    row_words = sorted(row_words, key=lambda w: w["x0"])
+    cells = [""] * len(column_starts)
+
+    for w in row_words:
+        x = w["x0"]
+        col_idx = 0
+
+        for i, start in enumerate(column_starts):
+            if i == len(column_starts) - 1:
+                col_idx = i
+                break
+            if start <= x < column_starts[i + 1]:
+                col_idx = i
+                break
+
+        if cells[col_idx]:
+            cells[col_idx] += " " + w["text"].strip()
+        else:
+            cells[col_idx] = w["text"].strip()
+
+    return [c.strip() for c in cells]
+
+
 def looks_like_borderless_header(row):
     text = " ".join(str(c).lower() for c in row if str(c).strip())
-    keywords = [
-        "item", "description", "qty", "quantity", "rate", "price",
-        "amount", "total", "hs", "code", "origin", "gross", "net"
-    ]
+    keywords = ["item", "description", "qty", "quantity", "rate", "price", "amount", "total", "hs", "code"]
     matches = sum(1 for k in keywords if k in text)
     return matches >= 2
+
+
+def extract_borderless_tables_from_page(page):
+    words = page.extract_words(
+        x_tolerance=2,
+        y_tolerance=2,
+        keep_blank_chars=False,
+        use_text_flow=True
+    )
+
+    if not words:
+        return []
+
+    rows = group_words_into_rows(words, y_tolerance=5)
+    if not rows:
+        return []
+
+    column_starts = detect_borderless_columns(words, min_repeats=3, bucket_size=30)
+    if len(column_starts) < 2:
+        return []
+
+    rebuilt = []
+    for row in rows:
+        cells = assign_words_to_columns(row["words"], column_starts)
+        if any(str(c).strip() for c in cells):
+            rebuilt.append(cells)
+
+    cleaned = []
+    for row in rebuilt:
+        non_empty = sum(1 for c in row if str(c).strip())
+        if non_empty >= 2:
+            cleaned.append(row)
+
+    if len(cleaned) < 2:
+        return []
+
+    header_found = any(looks_like_borderless_header(r) for r in cleaned[:5])
+    if not header_found:
+        return []
+
+    return cleaned
 
 
 def looks_like_item_header(row):
@@ -284,28 +393,6 @@ def is_noise_row(row):
     ]
 
     if any(keyword in text for keyword in noise_keywords):
-        if not is_total_row(row):
-            return True
-
-    return False
-
-
-def is_preheader_metadata_row(row):
-    text = row_text(row)
-
-    metadata_keywords = [
-        "commercial invoice", "invoice", "invoice no", "invoice number",
-        "invoice date", "buyer", "consignee", "importer", "exporter",
-        "seller", "shipper", "address", "po box", "telephone", "tel",
-        "email", "fax", "trn", "vat", "country of export", "country of import",
-        "port of loading", "port of discharge", "mode of transport"
-    ]
-
-    if any(k in text for k in metadata_keywords) and not looks_like_item_header(row):
-        return True
-
-    # Usually company/address blocks have only 1-2 filled cells and no table keywords
-    if row_non_empty_count(row) <= 2 and not looks_like_item_header(row):
         if not is_total_row(row):
             return True
 
@@ -434,128 +521,12 @@ def get_best_pdf_for_extraction(pdf_path):
     return pdf_path
 
 
-# =========================================================
-# PDFPLUMBER EXTRACTION
-# =========================================================
-def group_words_into_rows(words, y_tolerance=6):
-    rows = []
-
-    for word in sorted(words, key=lambda w: (w["top"], w["x0"])):
-        placed = False
-
-        for row in rows:
-            if abs(row["top"] - word["top"]) <= y_tolerance:
-                row["words"].append(word)
-                row["tops"].append(word["top"])
-                row["top"] = sum(row["tops"]) / len(row["tops"])
-                placed = True
-                break
-
-        if not placed:
-            rows.append({
-                "top": word["top"],
-                "tops": [word["top"]],
-                "words": [word]
-            })
-
-    return rows
-
-
-def detect_borderless_columns(words, min_repeats=3, bucket_size=25):
-    buckets = {}
-
-    for w in words:
-        x = int(w["x0"] // bucket_size) * bucket_size
-        buckets[x] = buckets.get(x, 0) + 1
-
-    candidate_x = [x for x, count in buckets.items() if count >= min_repeats]
-    candidate_x.sort()
-
-    if len(candidate_x) < 2:
-        return []
-
-    merged = [candidate_x[0]]
-    for x in candidate_x[1:]:
-        if abs(x - merged[-1]) > bucket_size:
-            merged.append(x)
-
-    return merged
-
-
-def assign_words_to_columns(row_words, column_starts):
-    row_words = sorted(row_words, key=lambda w: w["x0"])
-    cells = [""] * len(column_starts)
-
-    for w in row_words:
-        x = w["x0"]
-        col_idx = 0
-
-        for i, start in enumerate(column_starts):
-            if i == len(column_starts) - 1:
-                col_idx = i
-                break
-            if start <= x < column_starts[i + 1]:
-                col_idx = i
-                break
-
-        if cells[col_idx]:
-            cells[col_idx] += " " + w["text"].strip()
-        else:
-            cells[col_idx] = w["text"].strip()
-
-    return [c.strip() for c in cells]
-
-
-def extract_borderless_tables_from_page(page):
-    words = page.extract_words(
-        x_tolerance=2,
-        y_tolerance=2,
-        keep_blank_chars=False,
-        use_text_flow=True
-    )
-
-    if not words:
-        return []
-
-    rows = group_words_into_rows(words, y_tolerance=5)
-    if not rows:
-        return []
-
-    column_starts = detect_borderless_columns(words, min_repeats=3, bucket_size=30)
-    if len(column_starts) < 2:
-        return []
-
-    rebuilt = []
-    for row in rows:
-        cells = assign_words_to_columns(row["words"], column_starts)
-        if any(str(c).strip() for c in cells):
-            rebuilt.append(cells)
-
-    cleaned = []
-    for row in rebuilt:
-        non_empty = sum(1 for c in row if str(c).strip())
-        if non_empty >= 2:
-            cleaned.append(row)
-
-    if len(cleaned) < 2:
-        return []
-
-    header_found = any(looks_like_borderless_header(r) for r in cleaned[:5])
-    if not header_found:
-        return []
-
-    return cleaned
-
-
-def extract_tables_with_pdfplumber(pdf_path):
+def extract_all_tables(pdf_path):
     candidate_tables = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_num, page in enumerate(pdf.pages, start=1):
-            try:
-                tables = page.extract_tables()
-            except Exception:
-                tables = []
+            tables = page.extract_tables()
 
             for table in tables:
                 cleaned = normalize_rows(table)
@@ -568,14 +539,10 @@ def extract_tables_with_pdfplumber(pdf_path):
                             "page": page_num,
                             "table": cleaned,
                             "score": score,
-                            "method": "pdfplumber_lined"
+                            "method": "lined"
                         })
 
-            try:
-                borderless = extract_borderless_tables_from_page(page)
-            except Exception:
-                borderless = []
-
+            borderless = extract_borderless_tables_from_page(page)
             if borderless:
                 cleaned = normalize_rows(borderless)
                 if len(cleaned) >= 2:
@@ -587,164 +554,8 @@ def extract_tables_with_pdfplumber(pdf_path):
                             "page": page_num,
                             "table": cleaned,
                             "score": score,
-                            "method": "pdfplumber_borderless"
+                            "method": "borderless"
                         })
-
-    return candidate_tables
-
-
-# =========================================================
-# PYMUPDF EXTRACTION
-# =========================================================
-def pymupdf_group_words_into_rows(words, y_tolerance=4):
-    rows = []
-
-    for word in sorted(words, key=lambda w: (w["y0"], w["x0"])):
-        placed = False
-
-        for row in rows:
-            if abs(row["y"] - word["y0"]) <= y_tolerance:
-                row["words"].append(word)
-                row["ys"].append(word["y0"])
-                row["y"] = sum(row["ys"]) / len(row["ys"])
-                placed = True
-                break
-
-        if not placed:
-            rows.append({
-                "y": word["y0"],
-                "ys": [word["y0"]],
-                "words": [word]
-            })
-
-    return rows
-
-
-def pymupdf_detect_columns(words, min_repeats=3, bucket_size=30):
-    buckets = {}
-
-    for w in words:
-        x = int(w["x0"] // bucket_size) * bucket_size
-        buckets[x] = buckets.get(x, 0) + 1
-
-    candidate_x = [x for x, count in buckets.items() if count >= min_repeats]
-    candidate_x.sort()
-
-    if len(candidate_x) < 2:
-        return []
-
-    merged = [candidate_x[0]]
-    for x in candidate_x[1:]:
-        if abs(x - merged[-1]) > bucket_size:
-            merged.append(x)
-
-    return merged
-
-
-def pymupdf_assign_words_to_columns(row_words, column_starts):
-    row_words = sorted(row_words, key=lambda w: w["x0"])
-    cells = [""] * len(column_starts)
-
-    for w in row_words:
-        x = w["x0"]
-        col_idx = 0
-
-        for i, start in enumerate(column_starts):
-            if i == len(column_starts) - 1:
-                col_idx = i
-                break
-            if start <= x < column_starts[i + 1]:
-                col_idx = i
-                break
-
-        if cells[col_idx]:
-            cells[col_idx] += " " + w["text"].strip()
-        else:
-            cells[col_idx] = w["text"].strip()
-
-    return [c.strip() for c in cells]
-
-
-def extract_tables_with_pymupdf(pdf_path):
-    candidate_tables = []
-    doc = fitz.open(pdf_path)
-
-    try:
-        for page_num, page in enumerate(doc, start=1):
-            words_raw = page.get_text("words")
-            if not words_raw:
-                continue
-
-            words = []
-            for w in words_raw:
-                x0, y0, x1, y1, text, *_ = w
-                text = str(text).strip()
-                if not text:
-                    continue
-                words.append({
-                    "x0": x0,
-                    "y0": y0,
-                    "x1": x1,
-                    "y1": y1,
-                    "text": text
-                })
-
-            if not words:
-                continue
-
-            rows = pymupdf_group_words_into_rows(words, y_tolerance=5)
-            if not rows:
-                continue
-
-            column_starts = pymupdf_detect_columns(words, min_repeats=3, bucket_size=35)
-            if len(column_starts) < 2:
-                continue
-
-            rebuilt = []
-            for row in rows:
-                cells = pymupdf_assign_words_to_columns(row["words"], column_starts)
-                if any(str(c).strip() for c in cells):
-                    rebuilt.append(cells)
-
-            cleaned = []
-            for row in rebuilt:
-                non_empty = sum(1 for c in row if str(c).strip())
-                if non_empty >= 2:
-                    cleaned.append(row)
-
-            cleaned = normalize_rows(cleaned)
-            if len(cleaned) >= 2:
-                cleaned = merge_multiline_rows(cleaned)
-                score = score_table(cleaned) + 8
-
-                if score >= 20:
-                    candidate_tables.append({
-                        "page": page_num,
-                        "table": cleaned,
-                        "score": score,
-                        "method": "pymupdf_words"
-                    })
-    finally:
-        doc.close()
-
-    return candidate_tables
-
-
-# =========================================================
-# COMBINE EXTRACTION SOURCES
-# =========================================================
-def extract_all_tables(pdf_path):
-    candidate_tables = []
-
-    try:
-        candidate_tables.extend(extract_tables_with_pdfplumber(pdf_path))
-    except Exception:
-        pass
-
-    try:
-        candidate_tables.extend(extract_tables_with_pymupdf(pdf_path))
-    except Exception:
-        pass
 
     return candidate_tables
 
@@ -831,17 +642,40 @@ CANONICAL_COLUMNS = [
 ]
 
 HEADER_ALIASES = {
-    "Item No": ["item", "item no", "item no.", "sr no", "s no", "no", "#", "line", "line no"],
-    "Description": ["description", "goods description", "item description", "product", "details", "arabic description", "commodity", "name"],
-    "HS Code": ["hs", "hs code", "hscode", "harmonized code", "tariff code", "code"],
-    "Qty": ["qty", "quantity", "quant", "pcs", "pieces", "piece", "q'ty"],
-    "Unit": ["unit", "uom", "unit type", "measure", "packing unit"],
-    "Unit Price": ["unit price", "price", "rate", "price/unit", "unit rate"],
-    "Amount": ["amount", "value", "line total", "total", "net amount", "item value"],
-    "Origin": ["origin", "country", "country of origin", "made in"],
-    "Gross Weight": ["gross weight", "gross wt", "g.w", "gw", "gross"],
-    "Net Weight": ["net weight", "net wt", "n.w", "nw", "net"],
-    "Source": ["source"],
+    "Item No": [
+        "item", "item no", "item no.", "sr no", "s no", "no", "#", "line", "line no"
+    ],
+    "Description": [
+        "description", "goods description", "item description", "product", "details",
+        "arabic description", "commodity", "name"
+    ],
+    "HS Code": [
+        "hs", "hs code", "hscode", "harmonized code", "tariff code", "code"
+    ],
+    "Qty": [
+        "qty", "quantity", "quant", "pcs", "pieces", "piece", "q'ty"
+    ],
+    "Unit": [
+        "unit", "uom", "unit type", "measure", "packing unit"
+    ],
+    "Unit Price": [
+        "unit price", "price", "rate", "price/unit", "unit rate"
+    ],
+    "Amount": [
+        "amount", "value", "line total", "total", "net amount", "item value"
+    ],
+    "Origin": [
+        "origin", "country", "country of origin", "made in"
+    ],
+    "Gross Weight": [
+        "gross weight", "gross wt", "g.w", "gw", "gross"
+    ],
+    "Net Weight": [
+        "net weight", "net wt", "n.w", "nw", "net"
+    ],
+    "Source": [
+        "source"
+    ],
 }
 
 COMMON_COUNTRIES = {
@@ -871,43 +705,44 @@ def header_match_score(cell_text: str, canonical: str) -> int:
         elif alias_norm in text:
             score = max(score, 70)
 
-    if canonical == "HS Code" and "hs" in text and "code" in text:
-        score = max(score, 100)
+    if canonical == "HS Code":
+        if "hs" in text and "code" in text:
+            score = max(score, 100)
 
-    if canonical == "Gross Weight" and "gross" in text:
-        score = max(score, 75)
+    if canonical == "Gross Weight":
+        if "gross" in text:
+            score = max(score, 75)
 
-    if canonical == "Net Weight" and "net" in text:
-        score = max(score, 75)
+    if canonical == "Net Weight":
+        if "net" in text:
+            score = max(score, 75)
 
-    if canonical == "Unit Price" and ("price" in text or "rate" in text):
-        score = max(score, 70)
+    if canonical == "Unit Price":
+        if "price" in text or "rate" in text:
+            score = max(score, 70)
 
-    if canonical == "Amount" and ("amount" in text or "value" in text or text == "total"):
-        score = max(score, 70)
+    if canonical == "Amount":
+        if "amount" in text or "value" in text or text == "total":
+            score = max(score, 70)
 
     return score
 
 
-def detect_best_header_row(table: List[List[str]], top_n: int = 8) -> int:
+def detect_best_header_row(table: List[List[str]], top_n: int = 6) -> int:
     if not table:
         return 0
 
     best_idx = 0
-    best_score = -10**9
+    best_score = -1
 
     for idx, row in enumerate(table[:top_n]):
         row_score = 0
-
         for cell in row:
             for canonical in CANONICAL_COLUMNS:
                 row_score += header_match_score(str(cell), canonical)
 
         if looks_like_item_header(row):
-            row_score += 80
-
-        if is_preheader_metadata_row(row):
-            row_score -= 120
+            row_score += 50
 
         numeric_cells = sum(1 for c in row if parse_number(c) is not None)
         if numeric_cells >= max(2, len(row) // 2):
@@ -920,21 +755,15 @@ def detect_best_header_row(table: List[List[str]], top_n: int = 8) -> int:
     return best_idx
 
 
-def drop_rows_above_header(table: List[List[str]]) -> List[List[str]]:
-    if not table:
-        return []
-
-    header_idx = detect_best_header_row(table)
-    return table[header_idx:]
-
-
 def is_hs_code_value(value: str) -> bool:
     value = str(value).strip()
     if not value:
         return False
 
     compact = value.replace(".", "").replace(" ", "").replace("-", "")
-    return re.fullmatch(r"\d{4,12}", compact) is not None
+    if re.fullmatch(r"\d{4,12}", compact):
+        return True
+    return False
 
 
 def is_country_value(value: str) -> bool:
@@ -946,7 +775,10 @@ def is_country_value(value: str) -> bool:
     if norm in COMMON_COUNTRIES:
         return True
 
-    return re.fullmatch(r"[A-Z]{2}", raw) is not None
+    if re.fullmatch(r"[A-Z]{2}", raw):
+        return True
+
+    return False
 
 
 def is_source_value(value: str) -> bool:
@@ -991,7 +823,8 @@ def count_source_like(values: List[str]) -> int:
 
 def score_column_for_canonical(header_cell: str, values: List[str], canonical: str) -> int:
     score = 0
-    score += header_match_score(header_cell, canonical)
+    header_score = header_match_score(header_cell, canonical)
+    score += header_score
 
     non_empty_values = [str(v).strip() for v in values if str(v).strip()]
     num_density = numeric_density(non_empty_values)
@@ -1081,7 +914,8 @@ def infer_column_mapping(header_row: List[str], body_rows: List[List[str]]) -> T
         column_scores[col_idx] = {}
 
         for canonical in CANONICAL_COLUMNS:
-            column_scores[col_idx][canonical] = score_column_for_canonical(header_cell, samples, canonical)
+            score = score_column_for_canonical(header_cell, samples, canonical)
+            column_scores[col_idx][canonical] = score
 
     assignments: Dict[int, str] = {}
     used_canonicals = set()
@@ -1111,13 +945,11 @@ def standardize_table_columns(table: List[List[str]]) -> List[List[str]]:
     if not table:
         return []
 
-    # KEY FIX: remove all rows above the actual header
-    table = drop_rows_above_header(table)
-    if not table:
-        return []
-
-    header_idx = 0
+    header_idx = detect_best_header_row(table)
     body = table[header_idx + 1:] if header_idx + 1 < len(table) else []
+
+    if not body:
+        body = table[1:] if len(table) > 1 else []
 
     raw_header = table[header_idx] if table else []
     max_cols = max(len(r) for r in [raw_header] + body) if ([raw_header] + body) else 0
@@ -1125,11 +957,12 @@ def standardize_table_columns(table: List[List[str]]) -> List[List[str]]:
     raw_header = raw_header + [""] * (max_cols - len(raw_header))
     padded_body = [r + [""] * (max_cols - len(r)) for r in body]
 
-    assignments, _ = infer_column_mapping(raw_header, padded_body)
+    assignments, unmatched = infer_column_mapping(raw_header, padded_body)
 
     ordered_columns = []
     used_original_cols = set()
 
+    # First add confident canonical columns
     for canonical in CANONICAL_COLUMNS:
         chosen_col = None
         for col_idx, assigned_name in assignments.items():
@@ -1140,6 +973,7 @@ def standardize_table_columns(table: List[List[str]]) -> List[List[str]]:
             ordered_columns.append((canonical, chosen_col))
             used_original_cols.add(chosen_col)
 
+    # Keep original PDF headers for unmatched columns
     extra_columns = [idx for idx in range(max_cols) if idx not in used_original_cols]
 
     for idx in extra_columns:
@@ -1154,7 +988,9 @@ def standardize_table_columns(table: List[List[str]]) -> List[List[str]]:
 
         original_header = str(raw_header[idx]).strip()
 
-        if not original_header or original_header.lower() in {"nan", "none", "-", "--", "column", "unnamed"}:
+        if not original_header or original_header.lower() in {
+            "nan", "none", "-", "--", "column", "unnamed"
+        }:
             original_header = f"Column {idx + 1}"
 
         existing_names = {name.lower() for name, _ in ordered_columns}
@@ -1214,9 +1050,16 @@ def is_summary_row(row):
     text = " ".join(str(cell).strip().lower() for cell in row if str(cell).strip())
 
     summary_keywords = [
-        "subtotal", "sub total", "invoice total", "grand total",
-        "total amount", "net total", "final invoice value",
-        "discount", "less:", "total:"
+        "subtotal",
+        "sub total",
+        "invoice total",
+        "grand total",
+        "total amount",
+        "net total",
+        "final invoice value",
+        "discount",
+        "less:",
+        "total:"
     ]
 
     return any(keyword in text for keyword in summary_keywords)
@@ -1227,12 +1070,15 @@ def filter_items_only(table):
         return table
 
     filtered = []
+
     for i, row in enumerate(table):
         if i == 0:
             filtered.append(row)
             continue
+
         if is_summary_row(row):
             continue
+
         filtered.append(row)
 
     return filtered
@@ -1323,6 +1169,7 @@ def build_summary(table):
                 explicit_net_total = last_num
             elif ("total" in txt or "amount" in txt or "value" in txt or "subtotal" in txt) and last_num is not None:
                 explicit_value_total = last_num
+
             continue
 
         if row_non_empty_count(row) >= 2:
@@ -1703,7 +1550,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         if not combined_table:
             raise HTTPException(status_code=400, detail="Could not combine extracted tables.")
 
-        # KEY FIX: this now removes everything above the real header
         combined_table = standardize_table_columns(combined_table)
         combined_table = add_source_column_if_missing(combined_table)
 
