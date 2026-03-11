@@ -9,15 +9,9 @@ import pdfplumber
 import pandas as pd
 import re
 import sqlite3
+import json
 from datetime import datetime
-import cv2
-import numpy as np
-from pdf2image import convert_from_path
-
-try:
-    from paddleocr import PPStructureV3
-except Exception:
-    PPStructureV3 = None
+from typing import List, Dict, Tuple
 
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
@@ -41,26 +35,10 @@ DB_PATH = os.path.join(BASE_DIR, "app.db")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# =========================
-# AI TABLE PARSER (OPTIONAL)
-# =========================
-AI_PARSER_AVAILABLE = False
-ai_parser = None
 
-if PPStructureV3 is not None:
-    try:
-        ai_parser = PPStructureV3(
-            lang="en",
-            device="cpu",
-            use_doc_orientation_classify=True,
-            use_doc_unwarping=True
-        )
-        AI_PARSER_AVAILABLE = True
-        print("AI parser loaded successfully.")
-    except Exception as e:
-        print("AI parser init failed:", str(e))
-
-
+# =========================================================
+# DATABASE
+# =========================================================
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -128,12 +106,12 @@ def startup():
 
 @app.get("/")
 def home():
-    return {
-        "message": "UAE Customs Automation Backend Running",
-        "ai_parser_available": AI_PARSER_AVAILABLE
-    }
+    return {"message": "UAE Customs Automation Backend Running"}
 
 
+# =========================================================
+# BASIC HELPERS
+# =========================================================
 def clean_cell(cell):
     if cell is None:
         return ""
@@ -142,6 +120,121 @@ def clean_cell(cell):
     return text
 
 
+def normalize_spaces(text):
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def sanitize_filename(name):
+    name = os.path.splitext(name)[0]
+    name = re.sub(r'[\\/*?:"<>|]', "", name)
+    name = re.sub(r"\s+", "_", name.strip())
+    return name
+
+
+def is_empty_row(row):
+    return all(str(cell).strip() == "" for cell in row)
+
+
+def row_non_empty_count(row):
+    return sum(1 for cell in row if str(cell).strip() != "")
+
+
+def row_text(row):
+    return " ".join(str(cell).strip().lower() for cell in row if str(cell).strip() != "")
+
+
+def parse_number(text):
+    if text is None:
+        return None
+    value = str(text).strip()
+    if not value:
+        return None
+
+    value = value.replace(",", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", value)
+    if not match:
+        return None
+
+    try:
+        return float(match.group())
+    except Exception:
+        return None
+
+
+def convert_cell_to_number(cell):
+    if cell is None:
+        return ""
+
+    value = str(cell).strip()
+    if value == "":
+        return ""
+
+    # Keep long numeric strings as text to avoid Excel scientific notation
+    digits_only = re.sub(r"[^\d]", "", value)
+    if digits_only and len(digits_only) >= 10:
+        return value
+
+    # Keep codes with hyphens/slashes as text
+    if re.search(r"[-/]", value):
+        return value
+
+    # Keep values starting with 0 as text
+    if re.fullmatch(r"0\d+", value):
+        return value
+
+    cleaned = value.replace(",", "")
+    cleaned = cleaned.replace("$", "")
+    cleaned = cleaned.replace("AED", "")
+    cleaned = cleaned.replace("USD", "")
+    cleaned = cleaned.replace("SAR", "")
+    cleaned = cleaned.strip()
+
+    if re.fullmatch(r"\(\d+(\.\d+)?\)", cleaned):
+        cleaned = "-" + cleaned[1:-1]
+
+    if re.fullmatch(r"-?\d+", cleaned):
+        try:
+            return int(cleaned)
+        except Exception:
+            return value
+
+    if re.fullmatch(r"-?\d+\.\d+", cleaned):
+        try:
+            return float(cleaned)
+        except Exception:
+            return value
+
+    return value
+
+
+def convert_table_numeric_values(table):
+    if not table:
+        return table
+
+    converted = []
+    for row_index, row in enumerate(table):
+        if row_index == 0:
+            converted.append(row)
+            continue
+        converted.append([convert_cell_to_number(cell) for cell in row])
+
+    return converted
+
+
+def build_preview_rows(table, limit=10):
+    if not table:
+        return []
+    preview = []
+    for i, row in enumerate(table):
+        preview.append([str(cell) for cell in row])
+        if i >= limit:
+            break
+    return preview
+
+
+# =========================================================
+# TABLE EXTRACTION HELPERS
+# =========================================================
 def group_words_into_rows(words, y_tolerance=6):
     rows = []
 
@@ -164,11 +257,6 @@ def group_words_into_rows(words, y_tolerance=6):
             })
 
     return rows
-
-
-def row_to_text_cells(row_words):
-    row_words = sorted(row_words, key=lambda w: w["x0"])
-    return [w["text"].strip() for w in row_words if w["text"].strip()]
 
 
 def detect_borderless_columns(words, min_repeats=3, bucket_size=25):
@@ -218,7 +306,7 @@ def assign_words_to_columns(row_words, column_starts):
 
 def looks_like_borderless_header(row):
     text = " ".join(str(c).lower() for c in row if str(c).strip())
-    keywords = ["item", "description", "qty", "quantity", "rate", "price", "amount", "total"]
+    keywords = ["item", "description", "qty", "quantity", "rate", "price", "amount", "total", "hs", "code"]
     matches = sum(1 for k in keywords if k in text)
     return matches >= 2
 
@@ -245,7 +333,6 @@ def extract_borderless_tables_from_page(page):
     rebuilt = []
     for row in rows:
         cells = assign_words_to_columns(row["words"], column_starts)
-
         if any(str(c).strip() for c in cells):
             rebuilt.append(cells)
 
@@ -265,52 +352,11 @@ def extract_borderless_tables_from_page(page):
     return cleaned
 
 
-def normalize_spaces(text):
-    return re.sub(r"\s+", " ", str(text)).strip()
-
-
-def sanitize_filename(name):
-    name = os.path.splitext(name)[0]
-    name = re.sub(r'[\\/*?:"<>|]', "", name)
-    name = re.sub(r"\s+", "_", name.strip())
-    return name
-
-
-def is_empty_row(row):
-    return all(str(cell).strip() == "" for cell in row)
-
-
-def row_non_empty_count(row):
-    return sum(1 for cell in row if str(cell).strip() != "")
-
-
-def row_text(row):
-    return " ".join(str(cell).strip().lower() for cell in row if str(cell).strip() != "")
-
-
-def parse_number(text):
-    if text is None:
-        return None
-    value = str(text).strip()
-    if not value:
-        return None
-
-    value = value.replace(",", "")
-    match = re.search(r"-?\d+(?:\.\d+)?", value)
-    if not match:
-        return None
-
-    try:
-        return float(match.group())
-    except Exception:
-        return None
-
-
 def looks_like_item_header(row):
     text = row_text(row)
     header_keywords = [
         "item", "description", "qty", "quantity", "unit", "price", "rate",
-        "amount", "total", "value", "hs code", "origin", "country",
+        "amount", "total", "value", "hs code", "hs", "origin", "country",
         "gross weight", "net weight", "arabic description"
     ]
     matches = sum(1 for keyword in header_keywords if keyword in text)
@@ -402,10 +448,8 @@ def merge_multiline_rows(rows):
             row = row + [""] * (max_len - len(row))
 
             for i in range(max_len):
-                row_val = str(row[i]).strip()
-                prev_val = str(prev[i]).strip()
-                if row_val:
-                    if prev_val:
+                if str(row[i]).strip():
+                    if str(prev[i]).strip():
                         prev[i] = f"{prev[i]} {row[i]}".strip()
                     else:
                         prev[i] = row[i]
@@ -438,6 +482,9 @@ def score_table(table):
     return (rows * 4) + (cols * 3) + filled + header_bonus + total_bonus
 
 
+# =========================================================
+# PDF ROTATION NORMALIZATION
+# =========================================================
 def normalize_rotated_pdf(input_pdf_path, output_pdf_path):
     reader = PdfReader(input_pdf_path)
     writer = PdfWriter()
@@ -513,137 +560,6 @@ def extract_all_tables(pdf_path):
     return candidate_tables
 
 
-# =========================
-# AI FALLBACK EXTRACTION
-# =========================
-def rotate_image_by_angle(img, angle):
-    if angle == 90:
-        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-    if angle == 180:
-        return cv2.rotate(img, cv2.ROTATE_180)
-    if angle == 270:
-        return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    return img
-
-
-def html_table_to_list(html):
-    try:
-        dfs = pd.read_html(html)
-        if not dfs:
-            return []
-        df = dfs[0].fillna("")
-        return df.values.tolist()
-    except Exception:
-        return []
-
-
-def normalize_ai_table(table):
-    if not table:
-        return []
-
-    cleaned = []
-    for row in table:
-        normalized_row = [clean_cell(cell) for cell in row]
-        if not is_empty_row(normalized_row):
-            cleaned.append(normalized_row)
-
-    if not cleaned:
-        return []
-
-    if len(cleaned) >= 2:
-        cleaned = merge_multiline_rows(cleaned)
-
-    return normalize_rows(cleaned)
-
-
-def extract_tables_with_ai(pdf_path):
-    if not AI_PARSER_AVAILABLE or ai_parser is None:
-        return []
-
-    candidate_tables = []
-
-    try:
-        pages = convert_from_path(pdf_path, dpi=300)
-    except Exception as e:
-        print("AI PDF image conversion failed:", str(e))
-        return []
-
-    for page_index, page in enumerate(pages, start=1):
-        img = cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
-        best_tables_for_page = []
-
-        for angle in [0, 90, 180, 270]:
-            rotated = rotate_image_by_angle(img, angle)
-
-            try:
-                result = ai_parser.predict(rotated)
-            except Exception:
-                try:
-                    result = ai_parser(rotated)
-                except Exception:
-                    continue
-
-            if not result:
-                continue
-
-            parsed_blocks = []
-            if isinstance(result, list):
-                parsed_blocks = result
-            else:
-                try:
-                    parsed_blocks = list(result)
-                except Exception:
-                    parsed_blocks = []
-
-            for block in parsed_blocks:
-                try:
-                    block_type = block.get("type", "")
-                    if block_type != "table":
-                        continue
-
-                    res_data = block.get("res", {})
-                    html = ""
-
-                    if isinstance(res_data, dict):
-                        html = res_data.get("html", "") or res_data.get("table_html", "")
-
-                    if not html:
-                        continue
-
-                    table = html_table_to_list(html)
-                    table = normalize_ai_table(table)
-
-                    if len(table) >= 2:
-                        score = score_table(table) + 30
-                        best_tables_for_page.append({
-                            "page": page_index,
-                            "table": table,
-                            "score": score,
-                            "method": f"ai_rot_{angle}"
-                        })
-                except Exception:
-                    continue
-
-        if best_tables_for_page:
-            best_tables_for_page = sorted(best_tables_for_page, key=lambda x: x["score"], reverse=True)
-
-            page_selected = []
-            seen_signatures = set()
-
-            for item in best_tables_for_page:
-                signature = str(item["table"][:3])
-                if signature in seen_signatures:
-                    continue
-                seen_signatures.add(signature)
-                page_selected.append(item)
-                if len(page_selected) >= 2:
-                    break
-
-            candidate_tables.extend(page_selected)
-
-    return candidate_tables
-
-
 def normalize_header_text(row):
     return tuple(re.sub(r"\s+", " ", str(cell).strip().lower()) for cell in row)
 
@@ -708,6 +624,469 @@ def combine_all_tables(candidate_tables):
     return unique_rows
 
 
+# =========================================================
+# SMART HEADER + COLUMN REPAIR
+# =========================================================
+CANONICAL_COLUMNS = [
+    "Item No",
+    "Description",
+    "HS Code",
+    "Qty",
+    "Unit",
+    "Unit Price",
+    "Amount",
+    "Origin",
+    "Gross Weight",
+    "Net Weight",
+    "Source"
+]
+
+HEADER_ALIASES = {
+    "Item No": [
+        "item", "item no", "item no.", "sr no", "s no", "no", "#", "line", "line no"
+    ],
+    "Description": [
+        "description", "goods description", "item description", "product", "details",
+        "arabic description", "commodity", "name"
+    ],
+    "HS Code": [
+        "hs", "hs code", "hscode", "harmonized code", "tariff code", "code"
+    ],
+    "Qty": [
+        "qty", "quantity", "quant", "pcs", "pieces", "piece", "q'ty"
+    ],
+    "Unit": [
+        "unit", "uom", "unit type", "measure", "packing unit"
+    ],
+    "Unit Price": [
+        "unit price", "price", "rate", "price/unit", "unit rate"
+    ],
+    "Amount": [
+        "amount", "value", "line total", "total", "net amount", "item value"
+    ],
+    "Origin": [
+        "origin", "country", "country of origin", "made in"
+    ],
+    "Gross Weight": [
+        "gross weight", "gross wt", "g.w", "gw", "gross"
+    ],
+    "Net Weight": [
+        "net weight", "net wt", "n.w", "nw", "net"
+    ],
+    "Source": [
+        "source"
+    ],
+}
+
+COMMON_COUNTRIES = {
+    "uae", "united arab emirates", "china", "india", "saudi", "saudi arabia",
+    "pakistan", "japan", "korea", "south korea", "usa", "u.s.a", "united states",
+    "uk", "united kingdom", "germany", "italy", "france", "turkey", "oman", "qatar",
+    "kuwait", "bahrain", "malaysia", "thailand", "indonesia", "vietnam"
+}
+
+
+def normalize_header_name(text: str) -> str:
+    text = normalize_spaces(text).lower()
+    text = text.replace(".", "")
+    text = text.replace("_", " ")
+    return text
+
+
+def header_match_score(cell_text: str, canonical: str) -> int:
+    text = normalize_header_name(cell_text)
+    score = 0
+
+    for alias in HEADER_ALIASES.get(canonical, []):
+        alias_norm = normalize_header_name(alias)
+
+        if text == alias_norm:
+            score = max(score, 100)
+        elif alias_norm in text:
+            score = max(score, 70)
+
+    if canonical == "HS Code":
+        if "hs" in text and "code" in text:
+            score = max(score, 100)
+
+    if canonical == "Gross Weight":
+        if "gross" in text:
+            score = max(score, 75)
+
+    if canonical == "Net Weight":
+        if "net" in text:
+            score = max(score, 75)
+
+    if canonical == "Unit Price":
+        if "price" in text or "rate" in text:
+            score = max(score, 70)
+
+    if canonical == "Amount":
+        if "amount" in text or "value" in text or text == "total":
+            score = max(score, 70)
+
+    return score
+
+
+def detect_best_header_row(table: List[List[str]], top_n: int = 6) -> int:
+    if not table:
+        return 0
+
+    best_idx = 0
+    best_score = -1
+
+    for idx, row in enumerate(table[:top_n]):
+        row_score = 0
+        for cell in row:
+            for canonical in CANONICAL_COLUMNS:
+                row_score += header_match_score(str(cell), canonical)
+
+        if looks_like_item_header(row):
+            row_score += 50
+
+        numeric_cells = sum(1 for c in row if parse_number(c) is not None)
+        if numeric_cells >= max(2, len(row) // 2):
+            row_score -= 20
+
+        if row_score > best_score:
+            best_score = row_score
+            best_idx = idx
+
+    return best_idx
+
+
+def is_hs_code_value(value: str) -> bool:
+    value = str(value).strip()
+    if not value:
+        return False
+
+    compact = value.replace(".", "").replace(" ", "").replace("-", "")
+    if re.fullmatch(r"\d{4,12}", compact):
+        return True
+    return False
+
+
+def is_country_value(value: str) -> bool:
+    raw = str(value).strip()
+    if not raw:
+        return False
+
+    norm = normalize_header_name(raw)
+    if norm in COMMON_COUNTRIES:
+        return True
+
+    if re.fullmatch(r"[A-Z]{2}", raw):
+        return True
+
+    return False
+
+
+def is_source_value(value: str) -> bool:
+    value = str(value).strip().lower()
+    return value in {"ci", "ai", "manual", "ocr", "system"}
+
+
+def numeric_density(values: List[str]) -> float:
+    if not values:
+        return 0.0
+    cnt = sum(1 for v in values if parse_number(v) is not None)
+    return cnt / len(values)
+
+
+def avg_text_length(values: List[str]) -> float:
+    vals = [len(str(v).strip()) for v in values if str(v).strip()]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def mostly_integers(values: List[str]) -> float:
+    if not values:
+        return 0.0
+    cnt = 0
+    for v in values:
+        num = parse_number(v)
+        if num is not None and abs(num - round(num)) < 1e-9:
+            cnt += 1
+    return cnt / len(values)
+
+
+def count_hs_like(values: List[str]) -> int:
+    return sum(1 for v in values if is_hs_code_value(v))
+
+
+def count_country_like(values: List[str]) -> int:
+    return sum(1 for v in values if is_country_value(v))
+
+
+def count_source_like(values: List[str]) -> int:
+    return sum(1 for v in values if is_source_value(v))
+
+
+def score_column_for_canonical(header_cell: str, values: List[str], canonical: str) -> int:
+    score = 0
+    header_score = header_match_score(header_cell, canonical)
+    score += header_score
+
+    non_empty_values = [str(v).strip() for v in values if str(v).strip()]
+    num_density = numeric_density(non_empty_values)
+    integer_density = mostly_integers(non_empty_values)
+    avg_len = avg_text_length(non_empty_values)
+    hs_count = count_hs_like(non_empty_values)
+    country_count = count_country_like(non_empty_values)
+    source_count = count_source_like(non_empty_values)
+
+    if canonical == "Description":
+        if avg_len >= 12:
+            score += 35
+        if num_density < 0.45:
+            score += 15
+
+    elif canonical == "HS Code":
+        score += hs_count * 12
+        if num_density > 0.5:
+            score += 15
+
+    elif canonical == "Qty":
+        if integer_density > 0.6:
+            score += 30
+        if avg_len < 8:
+            score += 10
+
+    elif canonical == "Unit":
+        common_units = {"pcs", "pc", "kg", "kgs", "set", "sets", "box", "boxes", "ctn", "carton"}
+        unit_hits = sum(1 for v in non_empty_values if normalize_header_name(v) in common_units)
+        score += unit_hits * 10
+        if avg_len <= 5:
+            score += 10
+
+    elif canonical == "Unit Price":
+        if num_density > 0.6:
+            score += 20
+        decimal_hits = sum(1 for v in non_empty_values if re.search(r"\d+\.\d{1,4}", str(v)))
+        score += decimal_hits * 5
+
+    elif canonical == "Amount":
+        if num_density > 0.6:
+            score += 20
+        larger_hits = sum(1 for v in non_empty_values if (parse_number(v) or 0) >= 10)
+        score += min(larger_hits * 3, 20)
+
+    elif canonical == "Origin":
+        score += country_count * 12
+
+    elif canonical == "Gross Weight":
+        if num_density > 0.6:
+            score += 15
+        if "gross" in normalize_header_name(header_cell):
+            score += 40
+
+    elif canonical == "Net Weight":
+        if num_density > 0.6:
+            score += 15
+        if "net" in normalize_header_name(header_cell):
+            score += 40
+
+    elif canonical == "Source":
+        score += source_count * 20
+
+    elif canonical == "Item No":
+        if integer_density > 0.7:
+            score += 20
+        if avg_len <= 4:
+            score += 10
+
+    return score
+
+
+def infer_column_mapping(header_row: List[str], body_rows: List[List[str]]) -> Tuple[Dict[int, str], List[int]]:
+    if not header_row:
+        return {}, []
+
+    max_cols = len(header_row)
+    padded_body = []
+    for row in body_rows[:20]:
+        padded_body.append(row + [""] * (max_cols - len(row)))
+
+    column_scores: Dict[int, Dict[str, int]] = {}
+
+    for col_idx in range(max_cols):
+        header_cell = str(header_row[col_idx]) if col_idx < len(header_row) else ""
+        samples = [row[col_idx] for row in padded_body if col_idx < len(row)]
+        column_scores[col_idx] = {}
+
+        for canonical in CANONICAL_COLUMNS:
+            score = score_column_for_canonical(header_cell, samples, canonical)
+            column_scores[col_idx][canonical] = score
+
+    assignments: Dict[int, str] = {}
+    used_canonicals = set()
+
+    all_candidates = []
+    for col_idx, scores in column_scores.items():
+        for canonical, score in scores.items():
+            all_candidates.append((score, col_idx, canonical))
+
+    all_candidates.sort(reverse=True, key=lambda x: x[0])
+
+    for score, col_idx, canonical in all_candidates:
+        if score < 25:
+            continue
+        if col_idx in assignments:
+            continue
+        if canonical in used_canonicals and canonical not in {"Description"}:
+            continue
+        assignments[col_idx] = canonical
+        used_canonicals.add(canonical)
+
+    unmatched = [i for i in range(max_cols) if i not in assignments]
+    return assignments, unmatched
+
+
+def standardize_table_columns(table: List[List[str]]) -> List[List[str]]:
+    if not table:
+        return []
+
+    header_idx = detect_best_header_row(table)
+    body = table[header_idx + 1:] if header_idx + 1 < len(table) else []
+
+    if not body:
+        body = table[1:] if len(table) > 1 else []
+
+    raw_header = table[header_idx] if table else []
+    max_cols = max(len(r) for r in [raw_header] + body) if ([raw_header] + body) else 0
+
+    raw_header = raw_header + [""] * (max_cols - len(raw_header))
+    padded_body = [r + [""] * (max_cols - len(r)) for r in body]
+
+    assignments, unmatched = infer_column_mapping(raw_header, padded_body)
+
+    ordered_columns = []
+    used_original_cols = set()
+
+    # First add confident canonical columns
+    for canonical in CANONICAL_COLUMNS:
+        chosen_col = None
+        for col_idx, assigned_name in assignments.items():
+            if assigned_name == canonical and col_idx not in used_original_cols:
+                chosen_col = col_idx
+                break
+        if chosen_col is not None:
+            ordered_columns.append((canonical, chosen_col))
+            used_original_cols.add(chosen_col)
+
+    # Keep original PDF headers for unmatched columns
+    extra_columns = [idx for idx in range(max_cols) if idx not in used_original_cols]
+
+    for idx in extra_columns:
+        col_values = [
+            str(row[idx]).strip()
+            for row in padded_body
+            if idx < len(row) and str(row[idx]).strip()
+        ]
+
+        if not col_values:
+            continue
+
+        original_header = str(raw_header[idx]).strip()
+
+        if not original_header or original_header.lower() in {
+            "nan", "none", "-", "--", "column", "unnamed"
+        }:
+            original_header = f"Column {idx + 1}"
+
+        existing_names = {name.lower() for name, _ in ordered_columns}
+        final_header = original_header
+        suffix = 2
+
+        while final_header.lower() in existing_names:
+            final_header = f"{original_header} ({suffix})"
+            suffix += 1
+
+        ordered_columns.append((final_header, idx))
+        used_original_cols.add(idx)
+
+    if not ordered_columns:
+        return table
+
+    new_header = [name for name, _ in ordered_columns]
+    new_body = []
+
+    for row in padded_body:
+        new_row = []
+        for _, original_idx in ordered_columns:
+            new_row.append(row[original_idx] if original_idx < len(row) else "")
+        new_body.append(new_row)
+
+    cleaned_body = []
+    for row in new_body:
+        if not is_empty_row(row):
+            cleaned_body.append(row)
+
+    if not cleaned_body:
+        return [new_header]
+
+    return [new_header] + cleaned_body
+
+
+def add_source_column_if_missing(table):
+    if not table:
+        return table
+
+    header = table[0]
+    normalized = [str(h).strip().lower() for h in header]
+    if "source" in normalized:
+        return table
+
+    new_table = []
+    new_header = header + ["Source"]
+    new_table.append(new_header)
+
+    for row in table[1:]:
+        new_table.append(row + ["CI"])
+
+    return new_table
+
+
+def is_summary_row(row):
+    text = " ".join(str(cell).strip().lower() for cell in row if str(cell).strip())
+
+    summary_keywords = [
+        "subtotal",
+        "sub total",
+        "invoice total",
+        "grand total",
+        "total amount",
+        "net total",
+        "final invoice value",
+        "discount",
+        "less:",
+        "total:"
+    ]
+
+    return any(keyword in text for keyword in summary_keywords)
+
+
+def filter_items_only(table):
+    if not table:
+        return table
+
+    filtered = []
+
+    for i, row in enumerate(table):
+        if i == 0:
+            filtered.append(row)
+            continue
+
+        if is_summary_row(row):
+            continue
+
+        filtered.append(row)
+
+    return filtered
+
+
+# =========================================================
+# SUMMARY + COMPANY INFO
+# =========================================================
 def find_column_index(header_row, keywords):
     for i, cell in enumerate(header_row):
         cell_text = str(cell).strip().lower()
@@ -980,125 +1359,31 @@ def extract_company_info(pdf_path):
     return company_info
 
 
-def add_source_column_if_missing(table):
-    if not table:
-        return table
+# =========================================================
+# EXCEL FORMATTING
+# =========================================================
+def should_force_text(header_name, cell_value):
+    header = str(header_name).strip().lower()
+    value = str(cell_value).strip()
 
-    header = table[0]
-    normalized = [str(h).strip().lower() for h in header]
-    if "source" in normalized:
-        return table
+    if not value:
+        return False
 
-    new_table = []
-    new_header = header + ["Source"]
-    new_table.append(new_header)
-
-    for row in table[1:]:
-        new_table.append(row + ["CI"])
-
-    return new_table
-
-
-def is_summary_row(row):
-    text = " ".join(str(cell).strip().lower() for cell in row if str(cell).strip())
-
-    summary_keywords = [
-        "subtotal",
-        "sub total",
-        "invoice total",
-        "grand total",
-        "total amount",
-        "net total",
-        "final invoice value",
-        "discount",
-        "less:",
-        "total:"
+    text_headers = [
+        "hs code", "hs", "item no", "item", "origin", "source", "description"
     ]
 
-    return any(keyword in text for keyword in summary_keywords)
+    if any(h == header or h in header for h in text_headers):
+        return True
 
+    digits_only = re.sub(r"[^\d]", "", value)
+    if digits_only and len(digits_only) >= 10:
+        return True
 
-def filter_items_only(table):
-    if not table:
-        return table
+    if re.search(r"[-/]", value):
+        return True
 
-    filtered = []
-
-    for i, row in enumerate(table):
-        if i == 0:
-            filtered.append(row)
-            continue
-
-        if is_summary_row(row):
-            continue
-
-        filtered.append(row)
-
-    return filtered
-
-
-def convert_cell_to_number(cell):
-    if cell is None:
-        return ""
-
-    value = str(cell).strip()
-    if value == "":
-        return ""
-
-    if re.fullmatch(r"0\d+", value):
-        return value
-
-    cleaned = value.replace(",", "")
-    cleaned = cleaned.replace("$", "")
-    cleaned = cleaned.replace("AED", "")
-    cleaned = cleaned.replace("USD", "")
-    cleaned = cleaned.replace("SAR", "")
-    cleaned = cleaned.strip()
-
-    if re.fullmatch(r"\(\d+(\.\d+)?\)", cleaned):
-        cleaned = "-" + cleaned[1:-1]
-
-    if re.fullmatch(r"-?\d+", cleaned):
-        try:
-            return int(cleaned)
-        except Exception:
-            return value
-
-    if re.fullmatch(r"-?\d+\.\d+", cleaned):
-        try:
-            return float(cleaned)
-        except Exception:
-            return value
-
-    return value
-
-
-def convert_table_numeric_values(table):
-    if not table:
-        return table
-
-    converted = []
-
-    for row_index, row in enumerate(table):
-        if row_index == 0:
-            converted.append(row)
-            continue
-
-        converted.append([convert_cell_to_number(cell) for cell in row])
-
-    return converted
-
-
-def build_preview_rows(table, limit=10):
-    if not table:
-        return []
-
-    preview = []
-    for i, row in enumerate(table):
-        preview.append([str(cell) for cell in row])
-        if i >= limit:
-            break
-    return preview
+    return False
 
 
 def apply_excel_formatting(excel_path):
@@ -1123,12 +1408,14 @@ def apply_excel_formatting(excel_path):
                 cell.border = thin_border
                 cell.alignment = left_align
 
-        if ws.title == "Items":
-            if ws.max_row >= 1:
-                for cell in ws[1]:
-                    cell.fill = header_fill
-                    cell.font = header_font
-                    cell.alignment = center_align
+        if ws.max_row >= 1:
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = center_align
+
+        if ws.title == "Items" and ws.max_row >= 2:
+            headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
 
             for row in ws.iter_rows(min_row=2):
                 row_values = [str(cell.value).strip().lower() if cell.value is not None else "" for cell in row]
@@ -1138,13 +1425,15 @@ def apply_excel_formatting(excel_path):
                     for cell in row:
                         cell.fill = sub_header_fill
                         cell.font = bold_font
-        else:
-            if ws.max_row >= 1:
-                for cell in ws[1]:
-                    cell.fill = header_fill
-                    cell.font = header_font
-                    cell.alignment = center_align
 
+                for idx, cell in enumerate(row):
+                    header_name = headers[idx] if idx < len(headers) else ""
+                    cell_value = "" if cell.value is None else str(cell.value)
+
+                    if should_force_text(header_name, cell_value):
+                        cell.number_format = "@"
+                        cell.value = cell_value
+        else:
             for row in ws.iter_rows(min_row=2):
                 if ws.title in ["Company Info", "Summary"]:
                     if row[0].value:
@@ -1168,6 +1457,9 @@ def apply_excel_formatting(excel_path):
     wb.save(excel_path)
 
 
+# =========================================================
+# SAVE JOB
+# =========================================================
 def save_job(job_id, original_file_name, safe_file_name, payload, merged_items):
     conn = get_conn()
     cur = conn.cursor()
@@ -1219,7 +1511,6 @@ def save_job(job_id, original_file_name, safe_file_name, payload, merged_items):
         payload["data_sources"],
     ))
 
-    import json
     for idx, row in enumerate(merged_items):
         cur.execute(
             "INSERT INTO merged_items (job_id, row_index, row_json) VALUES (?, ?, ?)",
@@ -1230,6 +1521,9 @@ def save_job(job_id, original_file_name, safe_file_name, payload, merged_items):
     conn.close()
 
 
+# =========================================================
+# MAIN ROUTE
+# =========================================================
 @app.post("/upload-pdf/")
 async def upload_pdf(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
@@ -1249,18 +1543,14 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     try:
         candidate_tables = extract_all_tables(working_pdf_path)
-
         if not candidate_tables:
-            print("No tables found with standard extraction. Trying AI parser...")
-            candidate_tables = extract_tables_with_ai(working_pdf_path)
-
-        if not candidate_tables:
-            raise HTTPException(status_code=400, detail="No usable tables found in the PDF.")
+            raise HTTPException(status_code=400, detail="No clean usable tables found in the PDF.")
 
         combined_table = combine_all_tables(candidate_tables)
         if not combined_table:
             raise HTTPException(status_code=400, detail="Could not combine extracted tables.")
 
+        combined_table = standardize_table_columns(combined_table)
         combined_table = add_source_column_if_missing(combined_table)
 
         company_info = extract_company_info(working_pdf_path)
@@ -1317,8 +1607,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             "weight_matched": summary.get("Weight Matched Count", 0),
             "data_sources": summary.get("Data Sources Count", 1),
             "line_items": summary.get("Total Line Items", 0),
-            "merged_line_items": merged_preview,
-            "ai_parser_available": AI_PARSER_AVAILABLE
+            "merged_line_items": merged_preview
         }
 
         save_job(file_id, file.filename, safe_original_name, response_payload, merged_preview)
@@ -1330,6 +1619,9 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
 
+# =========================================================
+# DASHBOARD + JOB ROUTES
+# =========================================================
 @app.get("/dashboard-summary")
 def dashboard_summary():
     conn = get_conn()
@@ -1363,8 +1655,7 @@ def dashboard_summary():
         "pending_jobs": pending,
         "excel_exports": total_files,
         "total_items": total_items,
-        "recent_uploads": rows,
-        "ai_parser_available": AI_PARSER_AVAILABLE
+        "recent_uploads": rows
     }
 
 
@@ -1396,7 +1687,6 @@ def get_job(job_id: str):
     cur.execute("SELECT row_json FROM merged_items WHERE job_id = ? ORDER BY row_index ASC", (job_id,))
     rows = cur.fetchall()
 
-    import json
     merged_items = [json.loads(r["row_json"]) for r in rows]
 
     conn.close()
@@ -1404,7 +1694,6 @@ def get_job(job_id: str):
     result = dict(job)
     result["merged_line_items"] = merged_items
     result["excel_file"] = f"/download-excel/{job_id}?original_name={result['safe_file_name']}"
-    result["ai_parser_available"] = AI_PARSER_AVAILABLE
     return result
 
 
