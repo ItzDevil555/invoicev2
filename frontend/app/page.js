@@ -3,7 +3,11 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+<<<<<<< HEAD
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
+=======
+const API_BASE = "https://invoicev2-f8bf.onrender.com";
+>>>>>>> afced08ad38c90a1ad3d8ef33bd36b5363b5937b
 
 function cx(...classes) {
   return classes.filter(Boolean).join(" ");
