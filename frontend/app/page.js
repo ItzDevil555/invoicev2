@@ -153,40 +153,6 @@ export default function HomePage() {
         </div>
 
         <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_320px]">
-          <div className="mt-6 rounded-3xl border border-indigo-800 bg-gradient-to-r from-indigo-950/60 to-violet-950/60 p-6 shadow-sm">
-  
-  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-
-    <div>
-      <h3 className="text-lg font-bold text-white">
-        AI Document Intelligence (Coming Soon)
-      </h3>
-
-      <p className="mt-2 max-w-2xl text-sm text-slate-300">
-        We are currently integrating advanced AI document parsing to improve
-        accuracy for complex invoices, rotated PDFs, scanned documents,
-        and borderless tables.
-      </p>
-
-      <p className="mt-2 text-sm text-slate-400">
-        Upcoming features will include smarter table detection, automatic
-        column mapping, and improved data validation.
-      </p>
-    </div>
-
-    <div className="flex items-center gap-2">
-      <span className="rounded-full border border-indigo-700 bg-indigo-950 px-3 py-1 text-xs font-semibold text-indigo-300">
-        AI Upgrade
-      </span>
-
-      <span className="rounded-full border border-violet-700 bg-violet-950 px-3 py-1 text-xs font-semibold text-violet-300">
-        Soon
-      </span>
-    </div>
-
-  </div>
-
-</div>
           <SectionCard
             title="Upload Invoice PDF"
             subtitle="Choose a PDF and send it to your extraction backend"
@@ -260,7 +226,7 @@ export default function HomePage() {
                 After processing, you will be redirected to the result page automatically.
               </div>
               <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                Make sure your FastAPI backend is running on the correct API base URL.
+                AI-based accuracy improvements will be added soon for scanned, rotated, and complex PDFs.
               </div>
             </div>
           </SectionCard>
