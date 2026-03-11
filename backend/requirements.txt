@@ -5,7 +5,4 @@ pypdf
 pdfplumber
 pandas
 openpyxl
-opencv-python
-numpy
-pdf2image
-pillow
+pymupdf
