@@ -290,6 +290,28 @@ def is_noise_row(row):
     return False
 
 
+def is_preheader_metadata_row(row):
+    text = row_text(row)
+
+    metadata_keywords = [
+        "commercial invoice", "invoice", "invoice no", "invoice number",
+        "invoice date", "buyer", "consignee", "importer", "exporter",
+        "seller", "shipper", "address", "po box", "telephone", "tel",
+        "email", "fax", "trn", "vat", "country of export", "country of import",
+        "port of loading", "port of discharge", "mode of transport"
+    ]
+
+    if any(k in text for k in metadata_keywords) and not looks_like_item_header(row):
+        return True
+
+    # Usually company/address blocks have only 1-2 filled cells and no table keywords
+    if row_non_empty_count(row) <= 2 and not looks_like_item_header(row):
+        if not is_total_row(row):
+            return True
+
+    return False
+
+
 def normalize_rows(table):
     cleaned_rows = []
 
@@ -867,21 +889,25 @@ def header_match_score(cell_text: str, canonical: str) -> int:
     return score
 
 
-def detect_best_header_row(table: List[List[str]], top_n: int = 6) -> int:
+def detect_best_header_row(table: List[List[str]], top_n: int = 8) -> int:
     if not table:
         return 0
 
     best_idx = 0
-    best_score = -1
+    best_score = -10**9
 
     for idx, row in enumerate(table[:top_n]):
         row_score = 0
+
         for cell in row:
             for canonical in CANONICAL_COLUMNS:
                 row_score += header_match_score(str(cell), canonical)
 
         if looks_like_item_header(row):
-            row_score += 50
+            row_score += 80
+
+        if is_preheader_metadata_row(row):
+            row_score -= 120
 
         numeric_cells = sum(1 for c in row if parse_number(c) is not None)
         if numeric_cells >= max(2, len(row) // 2):
@@ -892,6 +918,14 @@ def detect_best_header_row(table: List[List[str]], top_n: int = 6) -> int:
             best_idx = idx
 
     return best_idx
+
+
+def drop_rows_above_header(table: List[List[str]]) -> List[List[str]]:
+    if not table:
+        return []
+
+    header_idx = detect_best_header_row(table)
+    return table[header_idx:]
 
 
 def is_hs_code_value(value: str) -> bool:
@@ -1077,11 +1111,13 @@ def standardize_table_columns(table: List[List[str]]) -> List[List[str]]:
     if not table:
         return []
 
-    header_idx = detect_best_header_row(table)
-    body = table[header_idx + 1:] if header_idx + 1 < len(table) else []
+    # KEY FIX: remove all rows above the actual header
+    table = drop_rows_above_header(table)
+    if not table:
+        return []
 
-    if not body:
-        body = table[1:] if len(table) > 1 else []
+    header_idx = 0
+    body = table[header_idx + 1:] if header_idx + 1 < len(table) else []
 
     raw_header = table[header_idx] if table else []
     max_cols = max(len(r) for r in [raw_header] + body) if ([raw_header] + body) else 0
@@ -1667,6 +1703,7 @@ async def upload_pdf(file: UploadFile = File(...)):
         if not combined_table:
             raise HTTPException(status_code=400, detail="Could not combine extracted tables.")
 
+        # KEY FIX: this now removes everything above the real header
         combined_table = standardize_table_columns(combined_table)
         combined_table = add_source_column_if_missing(combined_table)
 
