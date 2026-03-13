@@ -2,7 +2,10 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pypdf import PdfReader, PdfWriter
+from fastapi import Form
+from fastapi.responses import PlainTextResponse
 
+import io
 import os
 import uuid
 import pdfplumber
@@ -1622,6 +1625,317 @@ async def upload_pdf(file: UploadFile = File(...)):
 # =========================================================
 # DASHBOARD + JOB ROUTES
 # =========================================================
+
+# =========================================================
+# M2GEN / TRADETXT GENERATOR
+# =========================================================
+
+COUNTRY_MAP = {
+    "CAMBODIA": "KH",
+    "CHINA": "CN",
+    "PAKISTAN": "PK",
+    "VIETNAM": "VN",
+    "EGYPT": "EG",
+    "INDONESIA": "ID",
+    "JORDAN": "JO",
+    "THAILAND": "TH",
+    "INDIA": "IN",
+    "MYANMAR": "MM",
+    "BANGLADESH": "BD",
+    "SRI LANKA": "LK",
+    "TURKEY": "TR",
+    "COLOMBIA": "CO",
+}
+
+REGIME_MAP = {
+    "Import": "IMP",
+    "Export": "EXP",
+    "Transit": "TRN",
+    "Re-Export": "REX",
+    "Temporary Import": "TMP-IMP",
+    "Temporary Export": "TMP-EXP",
+}
+
+DECLARATION_MAP = {
+    "Commercial": "COM",
+    "Sample": "SMP",
+    "Return": "RTN",
+    "Personal": "PER",
+    "Internal Transfer": "INT",
+    "Free Zone Transfer": "FZT",
+}
+
+PAYMENT_MAP = {
+    "Cash": "CASH",
+    "Credit": "CRD",
+    "Bank Transfer": "BTR",
+    "Letter of Credit": "LC",
+    "Advance Payment": "ADV",
+    "Open Account": "OAC",
+}
+
+REQUIRED_COLUMNS = [
+    "HS Code",
+    "Description",
+    "Qty",
+    "Net Weight",
+    "Value",
+    "Country",
+]
+
+
+def m2_clean(value):
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def m2_safe_float(value):
+    try:
+        return float(str(value).replace(",", ""))
+    except Exception:
+        return 0.0
+
+
+def m2_format_date(value):
+    if not value:
+        return ""
+    try:
+        return pd.to_datetime(value).strftime("%Y-%m-%d")
+    except Exception:
+        return str(value)
+
+
+def m2_map_country(country):
+    c = m2_clean(country).upper()
+    return COUNTRY_MAP.get(c, c)
+
+
+def m2_read_excel(file_bytes, sheet_name):
+    return pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name, engine="openpyxl")
+
+
+def m2_get_sheets(file_bytes):
+    xls = pd.ExcelFile(io.BytesIO(file_bytes), engine="openpyxl")
+    return xls.sheet_names
+
+
+def m2_detect_invoice_info(df):
+    invoice_no = ""
+    invoice_date = ""
+    shipper = ""
+    inco_term = ""
+
+    for _, row in df.iterrows():
+        for cell in row:
+            text = m2_clean(cell)
+            lower_text = text.lower()
+
+            if "invoice no" in lower_text or "invoice number" in lower_text:
+                if "\n" in text:
+                    invoice_no = text.split("\n")[-1].strip()
+
+            if lower_text.startswith("date") or "date" in lower_text:
+                if "\n" in text:
+                    invoice_date = text.split("\n")[-1].strip()
+
+            if "shipper" in lower_text:
+                if "\n" in text:
+                    shipper = text.split("\n")[-1].strip()
+
+            if "inco" in lower_text or "incoterm" in lower_text:
+                if "\n" in text:
+                    inco_term = text.split("\n")[-1].strip()
+
+    return {
+        "invoice_no": invoice_no,
+        "invoice_date": m2_format_date(invoice_date),
+        "shipper": shipper,
+        "inco_term": inco_term,
+    }
+
+
+def m2_prepare_detail_df(df):
+    df = df.copy()
+    df.columns = [m2_clean(c) for c in df.columns]
+
+    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing columns: {', '.join(missing)}"
+        )
+
+    df = df[REQUIRED_COLUMNS].fillna("")
+
+    df = df[
+        (df["HS Code"].astype(str).str.strip() != "") &
+        (df["Description"].astype(str).str.strip() != "")
+    ].copy()
+
+    return df
+
+
+def m2_generate_txt(
+    invoice,
+    df,
+    regime,
+    declaration,
+    payment,
+    currency,
+    inco,
+    shipper_override
+):
+    shipper = shipper_override or invoice["shipper"] or "UNKNOWN SHIPPER"
+
+    regime_val = REGIME_MAP.get(regime, regime)
+    declaration_val = DECLARATION_MAP.get(declaration, declaration)
+    payment_val = PAYMENT_MAP.get(payment, payment)
+
+    total = df["Value"].apply(m2_safe_float).sum()
+
+    lines = []
+
+    header = [
+        "IH",
+        invoice["invoice_no"],
+        invoice["invoice_date"],
+        regime_val,
+        declaration_val,
+        shipper,
+        payment_val,
+        "",
+        currency,
+        f"{total:.3f}",
+        inco,
+        "",
+        "",
+        "",
+        "",
+    ]
+
+    lines.append(",".join(f'"{x}"' for x in header))
+
+    line_id = 1
+    for _, r in df.iterrows():
+        line = [
+            "ID",
+            str(line_id),
+            m2_clean(r["HS Code"]).split(".")[0],
+            m2_clean(r["Description"]),
+            "N",
+            "u",
+            f"{m2_safe_float(r['Qty']):.4f}",
+            "kg",
+            f"{m2_safe_float(r['Net Weight']):.4f}",
+            "",
+            "",
+            f"{m2_safe_float(r['Value']):.3f}",
+            m2_map_country(r["Country"]),
+            "",
+            "",
+            "",
+            "0",
+            ""
+        ]
+        lines.append(",".join(f'"{x}"' for x in line))
+        line_id += 1
+
+    return "\n".join(lines)
+
+
+@app.post("/inspect-special")
+async def inspect_special(file: UploadFile = File(...)):
+    content = await file.read()
+
+    sheets = m2_get_sheets(content)
+    invoice_sheet = "Invoice-2" if "Invoice-2" in sheets else sheets[0]
+    detail_sheet = "HTS_Sum_2" if "HTS_Sum_2" in sheets else sheets[0]
+
+    invoice_df = m2_read_excel(content, invoice_sheet)
+    detail_df = m2_read_excel(content, detail_sheet)
+
+    invoice_info = m2_detect_invoice_info(invoice_df)
+
+    detail_df.columns = [m2_clean(c) for c in detail_df.columns]
+    preview = detail_df.head(10).fillna("").to_dict(orient="records")
+
+    auto_mapping = {}
+    for col in detail_df.columns:
+        col_lower = col.lower()
+        if "hts code" in col_lower or col_lower == "hs code":
+            auto_mapping["HS Code"] = col
+        elif col_lower == "description":
+            auto_mapping["Description"] = col
+        elif "quantity" in col_lower or col_lower == "qty":
+            auto_mapping["Qty"] = col
+        elif "net weight" in col_lower or col_lower == "weight":
+            auto_mapping["Net Weight"] = col
+        elif col_lower == "value" or "total unit cost" in col_lower or "total price" in col_lower:
+            auto_mapping["Value"] = col
+        elif "country of origin" in col_lower or col_lower == "country":
+            auto_mapping["Country"] = col
+
+    return {
+        "sheet_names": sheets,
+        "selected_invoice_sheet": invoice_sheet,
+        "selected_detail_sheet": detail_sheet,
+        "invoice_info": invoice_info,
+        "detail_columns": list(detail_df.columns),
+        "detail_auto_mapping": auto_mapping,
+        "detail_preview_rows": preview
+    }
+
+
+@app.post("/generate-special", response_class=PlainTextResponse)
+async def generate_special(
+    file: UploadFile = File(...),
+    invoice_sheet: str = Form("Invoice-2"),
+    detail_sheet: str = Form("HTS_Sum_2"),
+    detail_mapping_json: str = Form(...),
+    shipper_override: str = Form(""),
+    regime_file_type: str = Form("Import"),
+    declaration_type: str = Form("Commercial"),
+    payment_method_type: str = Form("Bank Transfer"),
+    currency_override: str = Form("USD"),
+    inco_term_override: str = Form("EXW")
+):
+    content = await file.read()
+
+    try:
+        mapping = json.loads(detail_mapping_json)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid detail_mapping_json")
+
+    invoice_df = m2_read_excel(content, invoice_sheet)
+    detail_df = m2_read_excel(content, detail_sheet)
+
+    invoice = m2_detect_invoice_info(invoice_df)
+
+    detail_df = detail_df.copy()
+    detail_df.columns = [m2_clean(c) for c in detail_df.columns]
+
+    reverse_mapping = {}
+    for standard_name, actual_name in mapping.items():
+        reverse_mapping[m2_clean(actual_name)] = standard_name
+
+    detail_df = detail_df.rename(columns=reverse_mapping)
+
+    df = m2_prepare_detail_df(detail_df)
+
+    txt = m2_generate_txt(
+        invoice=invoice,
+        df=df,
+        regime=regime_file_type,
+        declaration=declaration_type,
+        payment=payment_method_type,
+        currency=currency_override,
+        inco=inco_term_override,
+        shipper_override=shipper_override
+    )
+
+    return txt
+
 @app.get("/dashboard-summary")
 def dashboard_summary():
     conn = get_conn()
